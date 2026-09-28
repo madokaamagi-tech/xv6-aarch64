@@ -39,8 +39,10 @@ kvmmake(void)
 
   // map kernel data and the physical RAM we'll make use of.
   kvmmap(kpgtbl, (uint64)etext, V2P(etext), (uint64)P2V(PHYSTOP)-(uint64)etext, PTE_NORMAL | PTE_XN);
-
-  return kpgtbl;
+  
+  // kalloc で得られるkernel data / heap領域をnormal-tagged memoryとして扱う
+//  kvmmap(kpgtbl, (uint64)etext, V2P(etext), (uint64)P2V(PHYSTOP)-(uint64)etext, PTE_TAGGED | PTE_XN);
+//  return kpgtbl;
 }
 
 // Initialize the one kernel_pagetable

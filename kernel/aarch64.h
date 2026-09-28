@@ -198,6 +198,76 @@ flush_tlb()
   isb();
 }
 
+// print utilities
+static inline uint64
+r_id_aa64pfr1_el1(void)
+{
+  uint64 x;
+  asm volatile("mrs %0, id_aa64pfr1_el1" : "=r"(x));
+  return x;
+}
+
+// 仮想アドレス変換の設定レジスタであるTCR_EL1を読む
+  // mrs : move to register from special register 
+  //       システムレジスタや特殊レジスタから汎用レジスタへ値を読み込む
+static inline uint64
+r_tcr_el1(void)
+{
+ uint64 x;
+ asm volatile("mrs %0, tcr_el1" : "=r"(x));
+ return x;
+}
+// TCR_EL1に値を書き込む
+   // msr : move to special register
+   //       システムレジスタに値を書き込む
+   // isb : instruction synchronization barrier
+   //       armプロセッサのパイプラインをフラッシュし，それ以降の命令を新しく再fetchさせるバリア命令
+static inline void
+w_tcr_el1(uint64 x)
+{
+  asm volatile("msr tcr_el1, %0" : : "r"(x));
+  isb();
+}
+// MMUやcache, MTE tag checkの有効化などを制御するレジスタであるSCTLR_EL1を読む
+static inline uint64
+r_sctlr_el1(void)
+{
+  uint64 x;
+  asm volatile("mrs %0, sctlr_el1" : "=r"(x));
+  return x;
+}
+// SCTLR_EL1に値を書き込む（MTEのtag checkを有効にするときに使用する）
+static inline void
+w_sctlr_el1(uint64 x)
+{
+  asm volatile("msr sctlr_el1, %0" : : "r"(x));
+  isb();
+}
+// MTEのrandom tag generationに関係するレジスタであるGCR_EL1に値を書き込む
+static inline void
+w_gcr_el1(uint64 x)
+{
+  asm volatile("msr s3_0_c1_c0_6, %0" : : "r"(x));
+  isb();
+}
+// tagを埋め込んだポインタを作成する (pointerの[59:56]にlogical tagを入れる)
+static inline uint64
+mte_tagged_ptr(uint64 ptr, uint64 tag)
+{
+  return (ptr & ~(0xfUL << 56)) | ((tag & 0xf) << 56);
+}
+// tagged pointerが指す16 byte granuleにSTG命令でallocation tagを書き込む
+static inline void
+mte_store_tag(uint64 tagged_ptr)
+{
+  asm volatile(
+    ".arch_extension memtag\n"
+    "stg %0, [%0]\n"
+    :
+    : "r"(tagged_ptr)
+    : "memory");
+}
+
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
 
@@ -235,15 +305,21 @@ typedef uint64 *pagetable_t; // 512 PTEs
 // index is set by mair_el1
 #define AI_DEVICE_nGnRnE_IDX  0x0
 #define AI_NORMAL_NC_IDX      0x1
+// MAIR_EL1のインデックス2のスロットのエントリをnormal-tagged memoryとして使用する
+#define AI_NORMAL_TAGGED_IDX  0x2
 
 // memory type
 #define MT_DEVICE_nGnRnE  0x0
 #define MT_NORMAL_NC      0x44
+// memory attributeの対応表を保持するレジスタであるMAIR_EL1に値を登録し，
+// PTE側で対応するattribute indexを選ぶことで，そのページをnormal-tagged memoryとして扱わせる
+#define MT_NORMAL_TAGGED  0xf0
 
 #define PTE_INDX(i) (((i) & 7) << 2)
 #define PTE_DEVICE  PTE_INDX(AI_DEVICE_nGnRnE_IDX)
 #define PTE_NORMAL  PTE_INDX(AI_NORMAL_NC_IDX)
-
+// mappages()でページをmapするときに使用するflag (vm.cでPTE_TAGGEDを使えるようにする)
+#define PTE_TAGGED  PTE_INDX(AI_NORMAL_TAGGED_IDX)
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa)  ((uint64)(pa) & 0xfffffffff000)
 #define PTE2PA(pte) ((uint64)(pte) & 0xfffffffff000)
@@ -271,3 +347,11 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define TCR_T1SZ(n)   (((n) & 0x3f) << 16)
 #define TCR_TG1(n)    (((n) & 0x3) << 30)
 #define TCR_IPS(n)    (((n) & 0x7) << 32)
+// カーネルアドレス側でTBIを有効にする
+#define TCR_TBI1        (1UL << 38)
+// tag check fault modeをマスクする
+#define SCTLR_TCF_MASK  (3UL << 40)
+// tag mismatchをsynchronous faultとして発生させる設定
+#define SCTLR_TCF_SYNC  (1UL << 40)
+// EL1からallocation tagへアクセスできるように設定するビット
+#define SCTLR_ATA       (1UL << 43)

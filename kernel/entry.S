@@ -110,11 +110,16 @@ entryothers:  // secondary CPU starts here
         msr ttbr1_el1, x1
 
         // setup tcr
-        ldr x0, =(TCR_T0SZ(25)|TCR_T1SZ(25)|TCR_TG0(0)|TCR_TG1(2)|TCR_IPS(0))
+        //ldr x0, =(TCR_T0SZ(25)|TCR_T1SZ(25)|TCR_TG0(0)|TCR_TG1(2)|TCR_IPS(0))
+        // kernel address側でTBIを有効化する
+        ldr x0, =(TCR_T0SZ(25)|TCR_T1SZ(25)|TCR_TG0(0)|TCR_TG1(2)|TCR_IPS(0)|TCR_TBI1)
         msr tcr_el1, x0
 
         // setup mair
-        ldr x1, =((MT_DEVICE_nGnRnE<<(8*AI_DEVICE_nGnRnE_IDX)) | (MT_NORMAL_NC<<(8*AI_NORMAL_NC_IDX)))
+        //ldr x1, =((MT_DEVICE_nGnRnE<<(8*AI_DEVICE_nGnRnE_IDX)) | (MT_NORMAL_NC<<(8*AI_NORMAL_NC_IDX)))
+        // normal-tagged memoryをMAIR_EL1に登録する
+        // (MAIR_EL1のindex 2にnormal-tagged memory の属性値である0xf0を登録する)
+        ldr x1, =((MT_DEVICE_nGnRnE<<(8*AI_DEVICE_nGnRnE_IDX)) | (MT_NORMAL_NC<<(8*AI_NORMAL_NC_IDX)) | (MT_NORMAL_TAGGED<<(8*AI_NORMAL_TAGGED_IDX)))
         msr mair_el1, x1
 
         isb
