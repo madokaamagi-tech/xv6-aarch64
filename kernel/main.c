@@ -28,7 +28,7 @@ mte_enable_el1(void)
   // 更新した値をSCTLR_EL1に書き込む
   w_sctlr_el1(sctlr);
 }
-
+/*
 static void
 mte_smoke_test(void)
 {
@@ -44,16 +44,40 @@ mte_smoke_test(void)
 
   *(volatile char *)tagged = 42;
   printf("mte smoke: tagged store ok\n");
-/*
+  
   uint64 bad = mte_tagged_ptr((uint64)p, 6);
 
   printf("mte smoke: bad=%p, next store should fault\n", bad);
   *(volatile char *)bad = 99;
 
   printf("mte smoke: ERROR bad tagged store did not fault\n");
-*/
+  
   kfree(p);
 }
+*/
+
+static void
+mte_smoke_test(void)
+{
+  char *p = (char*)P2V(PHYSTOP - PGSIZE);
+
+  uint64 tagged = mte_tagged_ptr((uint64)p, 5);
+
+  printf("mte smoke: p=%p tagged=%p\n", p, tagged);
+
+  mte_store_tag(tagged);
+
+  *(volatile char *)tagged = 42;
+  printf("mte smoke: tagged store ok\n");
+
+  uint64 bad = mte_tagged_ptr((uint64)p, 6);
+
+  printf("mte smoke: bad=%p, next store should fault\n", bad);
+  *(volatile char *)bad = 99;
+
+  printf("mte smoke: ERROR bad tagged store did not fault\n");
+}
+
 
 // start() jumps here in EL1 on all CPUs.
 void
@@ -66,7 +90,8 @@ main()
     kinit1(end, (void*)(KERNLINK+2*1024*1024));  // physical page allocator
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
-    kinit2((void*)(KERNLINK+2*1024*1024), P2V(PHYSTOP));
+//    kinit2((void*)(KERNLINK+2*1024*1024), P2V(PHYSTOP));
+    kinit2((void*)(KERNLINK+2*1024*1024), P2V(PHYSTOP - PGSIZE));
     consoleinit();
     printfinit();
     printf("\n");
