@@ -53,7 +53,13 @@ usertrap(void)
 {
   struct proc *p = myproc();
 
+  // ESR_EL1, ELR_EL1, FAR_EL1 の値を読み出してそれぞれ変数に格納
+  uint64 esr = r_esr_el1();
+  uint64 elr = r_elr_el1();
+  uint64 far = r_far_el1();
+  
   uint64 ec = (r_esr_el1() >> 26) & 0x3f;
+  uint64 iss = esr & 0x1ffffff;
   w_esr_el1(0);
   if(ec == 21){
     // system call
@@ -65,8 +71,10 @@ usertrap(void)
 
     syscall();
   } else {
-    printf("usertrap(): unexpected ec %p pid=%d\n", r_esr_el1(), p->pid);
-    printf("            elr=%p far=%p\n", r_elr_el1(), r_far_el1());
+//    printf("usertrap(): unexpected ec %p pid=%d\n", r_esr_el1(), p->pid);
+      printf("usertrap(): unexpected ec %p pid=%d\n", ec, p->pid);
+//    printf("            elr=%p far=%p\n", r_elr_el1(), r_far_el1());
+    printf("             esr=%p iss=%p elr=%p far=%p\n", esr, iss, elr, far);
     p->killed = 1;
   }
 

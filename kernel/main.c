@@ -14,6 +14,7 @@ void psci_call(uint64 fn, int cpuid, uint64 entry, uint64 ctxid);
 void delay(uint32 c);
 
 // kernel EL1でMTE tag checkとallocation tag accessを有効にする
+/*
 static void
 mte_enable_el1(void)
 {
@@ -28,6 +29,7 @@ mte_enable_el1(void)
   // 更新した値をSCTLR_EL1に書き込む
   w_sctlr_el1(sctlr);
 }
+*/
 /*
 static void
 mte_smoke_test(void)
@@ -55,7 +57,7 @@ mte_smoke_test(void)
   kfree(p);
 }
 */
-
+/*
 static void
 mte_smoke_test(void)
 {
@@ -77,7 +79,7 @@ mte_smoke_test(void)
 
   printf("mte smoke: ERROR bad tagged store did not fault\n");
 }
-
+*/
 
 // start() jumps here in EL1 on all CPUs.
 void
@@ -106,8 +108,8 @@ main()
     trapinit();      // trap vectors
     trapinithart();  // install trap vector
     // test
-    mte_enable_el1();
-    mte_smoke_test();
+//    mte_enable_el1();
+//    mte_smoke_test();
     // test
     gicv3init();     // set up interrupt controller
     gicv3inithart();

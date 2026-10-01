@@ -203,10 +203,17 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
+/*
     if((*pte & PTE_V) != PTE_V)
       panic("uvmunmap: not mapped");
     if((*pte & PTE_AF) == 0)
       panic("uvmunmap: not a leaf");
+*/
+    if ((*pte & PTE_AF) ==0)
+      panic("uvmunmap: not a leaf");
+    if (((*pte & PTE_V) != PTE_V) && do_free == 0)
+      panic("uvmunmap: notmapped");
+    
     if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)P2V(pa));
@@ -479,4 +486,21 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+uvmclearpresent(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+
+  va = PGROUNDDOWN(va);
+  pte = walk(pagetable, va, 0);
+  if (pte == 0) return -1;
+  if ((*pte & PTE_V) != PTE_V) return -1; 
+  // カーネル用ページならエラーとして扱う
+  if ((*pte & PTE_U) == 0) return -1;
+  // present bit 以外を全て1にしたマスクとの論理積を取ることで強制的にクリア 
+  *pte &= ~PTE_V;
+  flush_tlb();
+  return 0;
 }

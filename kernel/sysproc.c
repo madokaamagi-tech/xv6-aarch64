@@ -95,3 +95,14 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_pgclearpresent(void)
+{
+  uint64 va;
+
+  if (argaddr(0, &va) , 0)
+    return -1;
+
+  return uvmclearpresent(myproc()->pagetable, va);
+}
