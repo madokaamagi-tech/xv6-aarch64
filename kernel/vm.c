@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "proc.h"
 
+#define VPA_BASE (1ULL << 30)
 /*
  * the kernel's page table.
  */
@@ -503,4 +504,35 @@ uvmclearpresent(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_V;
   flush_tlb();
   return 0;
+}
+
+//  同一の物理アドレスに対してエイリアスの計算
+uint64
+vpa_alias_addr(uint64 tag)
+{
+  return VPA_BASE + tag * PGSIZE;
+}
+
+// エイリアスを作成するためのマッピングを確立
+int
+vpa_map_tag(pagetable_t pagetable, uint64 srcva, uint64 tag)
+{
+  pte_t *pte;
+  uint64 va;
+  uint64 pa;
+  uint64 flags;
+
+  srcva = PGROUNDDOWN(srcva);
+  va = vpa_alias_addr(tag);
+
+  pte = walk(pagetable, srcva, 0);
+  if(pte == 0)
+    return -1;
+  if((*pte & PTE_V) != PTE_V)
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+
+  return mappages(pagetable, va, PGSIZE, pa, flags);
 }

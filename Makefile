@@ -128,6 +128,7 @@ UPROGS=\
 	$U/_usertests\
 	$U/_pgfaulttest\
 	$U/_mallocfaulttest\
+	$U/_vpatest\
 	$U/_mallocspilltest\
 	$U/_grind\
 	$U/_wc\

@@ -24,6 +24,7 @@ char* sbrk(int);
 int sleep(int);
 int uptime(void);
 int pgclearpresent(void*);
+uint64 vpamap(void*, int);
 
 // ulib.c
 int stat(const char*, struct stat*);

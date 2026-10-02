@@ -106,3 +106,22 @@ sys_pgclearpresent(void)
 
   return uvmclearpresent(myproc()->pagetable, va);
 }
+
+// タグに対するエイリアスの仮想アドレスをマッピングしてユーザに返す
+uint64
+sys_vpamap(void)
+{
+  uint64 srcva;
+  int tag;
+
+  argaddr(0, &srcva);
+  argint(1, &tag);
+
+  if(tag < 0 || tag > 15)
+    return -1;
+
+  if(vpa_map_tag(myproc()->pagetable, srcva, tag) < 0)
+    return -1;
+
+  return vpa_alias_addr(tag);
+}
