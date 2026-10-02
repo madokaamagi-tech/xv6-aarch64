@@ -127,6 +127,8 @@ UPROGS=\
 	$U/_stressfs\
 	$U/_usertests\
 	$U/_pgfaulttest\
+	$U/_mallocfaulttest\
+	$U/_mallocspilltest\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
