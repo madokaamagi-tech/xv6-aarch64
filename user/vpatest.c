@@ -16,42 +16,64 @@ vpa(void *src, uint64 tag)
   return VPA_BASE + tag * VPA_TAG_STRIDE + page + off;
 }
 */
+
 int
 main(void)
 {
-  char *p = sbrk(PGSIZE);
-  if(p == (char*)-1){
+  char *p1 = sbrk(PGSIZE);
+  char *p2 = sbrk(PGSIZE);
+
+  if(p1 == (char*)-1 || p2 == (char*)-1){
     printf("sbrk failed\n");
     exit(1);
   }
 
-  p[0] = 1;
-  printf("original p=%p write ok\n", p);
+  p1[0] = 1;
+  p2[0] = 2;
 
-  uint64 good = vpamap(p, 5);
-  if(good == (uint64)-1){
-    printf("vpamap good failed\n");
+  printf("p1=%p\n", p1);
+  printf("p2=%p\n", p2);
+
+  uint64 p1_t5 = vpamap(p1, 5);
+  uint64 p2_t5 = vpamap(p2, 5);
+
+  if(p1_t5 == (uint64)-1 || p2_t5 == (uint64)-1){
+    printf("vpamap tag 5 failed\n");
     exit(1);
   }
 
-  uint64 bad = vpamap(p, 6);
-  if (bad == (uint64)-1){
-    printf("vpamap bad failed\n");
+  uint64 p1_t6 = vpamap(p1, 6);
+  uint64 p2_t6 = vpamap(p2, 6);
+
+  if(p1_t6 == (uint64)-1 || p2_t6 == (uint64)-1){
+    printf("vpamap tag 6 failed\n");
     exit(1);
   }
 
-  if (pgclearpresent((void *) bad) < 0) {
-    printf("pgclearpresent bad failed\n");
+  if(pgclearpresent((void *)p1_t6) < 0){
+    printf("pgclearpresent p1_t6 failed\n");
     exit(1);
   }
 
-  printf("good vpa=%p\n", good);
-  *(volatile char *)good = 2;
-  printf("good vpa write ok\n");
+  if(pgclearpresent((void *)p2_t6) < 0){
+    printf("pgclearpresent p2_t6 failed\n");
+    exit(1);
+  }
 
-  
-  printf("bad vpa=%p; next write should fault\n", bad);
-  *(volatile char *)bad = 3;
-  printf("ERROR: bad vpa write did not fault\n");
+  printf("p1 tag5=%p\n", p1_t5);
+  printf("p2 tag5=%p\n", p2_t5);
+  printf("p1 tag6=%p\n", p1_t6);
+  printf("p2 tag6=%p\n", p2_t6);
+
+  *(volatile char *)p1_t5 = 11;
+  printf("p1 tag5 write ok\n");
+
+  *(volatile char *)p2_t5 = 22;
+  printf("p2 tag5 write ok\n");
+
+  printf("p1 tag6 should fault now: %p\n", p1_t6);
+  *(volatile char *)p1_t6 = 33;
+
+  printf("ERROR: p1 tag6 write did not fault\n"); 
   exit(0);
 }
