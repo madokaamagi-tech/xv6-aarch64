@@ -123,5 +123,5 @@ sys_vpamap(void)
   if(vpa_map_tag(myproc()->pagetable, srcva, tag) < 0)
     return -1;
 
-  return vpa_alias_addr(tag);
+  return vpa_alias_addr(srcva, tag);
 }

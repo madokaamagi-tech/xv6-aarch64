@@ -9,6 +9,8 @@
 #include "proc.h"
 
 #define VPA_BASE (1ULL << 30)
+#define VPA_TAG_STRIDE (1ULL << 26)
+
 /*
  * the kernel's page table.
  */
@@ -508,9 +510,12 @@ uvmclearpresent(pagetable_t pagetable, uint64 va)
 
 //  同一の物理アドレスに対してエイリアスの計算
 uint64
-vpa_alias_addr(uint64 tag)
+vpa_alias_addr(uint64 srcva, uint64 tag)
 {
-  return VPA_BASE + tag * PGSIZE;
+  uint64 page = PGROUNDDOWN(srcva);
+  uint64 off = srcva - page;
+
+  return VPA_BASE + tag * VPA_TAG_STRIDE + page + off;
 }
 
 // エイリアスを作成するためのマッピングを確立
@@ -518,14 +523,15 @@ int
 vpa_map_tag(pagetable_t pagetable, uint64 srcva, uint64 tag)
 {
   pte_t *pte;
-  uint64 va;
+  uint64 srcpage;
+  uint64 vpa;
   uint64 pa;
   uint64 flags;
 
-  srcva = PGROUNDDOWN(srcva);
-  va = vpa_alias_addr(tag);
+  srcpage = PGROUNDDOWN(srcva);
+  vpa = PGROUNDDOWN(vpa_alias_addr(srcva, tag));
 
-  pte = walk(pagetable, srcva, 0);
+  pte = walk(pagetable, srcpage, 0);
   if(pte == 0)
     return -1;
   if((*pte & PTE_V) != PTE_V)
@@ -534,5 +540,5 @@ vpa_map_tag(pagetable_t pagetable, uint64 srcva, uint64 tag)
   pa = PTE2PA(*pte);
   flags = PTE_FLAGS(*pte);
 
-  return mappages(pagetable, va, PGSIZE, pa, flags);
+  return mappages(pagetable, vpa, PGSIZE, pa, flags);
 }

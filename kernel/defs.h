@@ -172,7 +172,7 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 void            switchuvm(struct proc *);
 void            switchkvm(void);
-uint64          vpa_alias_addr(uint64);
+uint64          vpa_alias_addr(uint64, uint64);
 int             vpa_map_tag(pagetable_t, uint64, uint64);
 
 // gicv3.c
