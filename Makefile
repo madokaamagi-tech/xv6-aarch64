@@ -130,6 +130,7 @@ UPROGS=\
 	$U/_mallocfaulttest\
 	$U/_vpatest\
 	$U/_vpalloctest\
+	$U/_vpafreelisttest\
 	$U/_mallocspilltest\
 	$U/_grind\
 	$U/_wc\
