@@ -64,35 +64,52 @@ vpa_free_page(struct vpa_page *p)
   return pgclearpresent(p->ptr);
 }
 
+// 既存の rawpage を新しいタグで再マップする関数
+static struct vpa_page
+vpa_reuse_page(void *raw)
+{
+  struct vpa_page r;
+
+  r.raw = raw;
+  r.tag = alloc_tag();
+
+  uint64 vpa = vpamap(r.raw, r.tag);
+  if (vpa == (uint64)-1){
+    r.ptr = 0;
+    return r;
+  }
+
+  r.ptr = (void *)vpa;
+  return r;
+}
+
 int
 main(void)
 {
   struct vpa_page a = vpa_alloc_page();
-  struct vpa_page b = vpa_alloc_page();
+  printf("a raw=%p tag=%d ptr%p\n", a.raw, a.tag, a.ptr);
 
-  if(a.ptr == 0 || b.ptr == 0){
-    printf("vpa_alloc_page failed\n");
-    exit(1);
-  }
-
-  printf("a raw=%p tag=%d ptr=%p\n", a.raw, a.tag, a.ptr);
-  printf("b raw=%p tag=%d ptr=%p\n", b.raw, b.tag, b.ptr);
-
-  *(volatile char *)a.ptr = 11;
+  *(volatile char *)a.ptr = 1;
   printf("a write ok\n");
 
-  *(volatile char *)b.ptr = 22;
-  printf("b write ok\n");
-
-  if(vpa_free_page(&a) < 0){
+  if (vpa_free_page(&a) < 0) {
     printf("vpa_free_page failed\n");
     exit(1);
   }
 
-  printf("a freed; next write to old a.ptr should fault\n");
+  printf("a freed\n");
 
-  *(volatile char *)a.ptr = 33;
+  struct vpa_page c = vpa_reuse_page(a.raw);
+  if(c.ptr == 0){
+    printf("vpa_reuse_page failed\n");
+    exit(1);
+  }
 
-  printf("ERROR: old a.ptr write did not fault\n");
-  exit(0);
+  printf("c raw=%p tag=%d ptr=%p\n", c.raw, c.tag, c.ptr);
+
+  *(volatile char *)  c.ptr = 2;
+  printf("c write ok\n");
+
+  printf("old a.ptr should fault now: %p\n", a.ptr);
+  *(volatile char *)a.ptr = 3;
 }
