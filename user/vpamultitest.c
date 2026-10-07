@@ -8,6 +8,8 @@
 struct vpa_meta {
   void *raw;      // sbrk()で確保した元の仮想アドレス
   void *ptr;      // tag + VPN(raw) で作成したVPA
+  uint64 nbytes;  // ユーザがvpa_malloc() に要求したサイズ
+  uint64 npages;  // 確保したページ数
   int tag;        // 今回のallocationに割り当てたタグ
   int active;     // 使用中かfree済みかを占める値
   int next_free;  // free list用のリンク
@@ -26,6 +28,12 @@ alloc_tag(void)
     next_tag = 1;
 
   return tag;
+}
+
+static uint64
+roundup_pages(uint64 nbytes)
+{
+  return (nbytes + PGSIZE - 1) / PGSIZE;
 }
 
 //  まだsbrk()でページを割り当てていないエントリを探す
@@ -52,14 +60,47 @@ find_active_by_ptr(void *ptr)
   return -1;
 }
 
+// free list の中から要求されるページ数と同じallocationを探す
+// (まずは分割や結合はせず．同じnpagesのものだけ再利用する)
+static int
+pop_free_meta(uint64 npages)
+{
+  int prev = -1;
+  int cur = free_head;
+
+  while (cur >= 0) {
+    if (metas[cur].npages == npages) {
+      if (prev < 0)
+        free_head = metas[cur].next_free;
+      else 
+        metas[prev].next_free = metas[cur].next_free;
+
+      metas[cur].next_free = -1;
+      return cur;
+    }
+
+    prev = cur;
+    cur = metas[cur].next_free;
+  }
+
+  return -1;
+}
+
+
 static void
 print_meta(char *name, void *ptr)
 {
   for (int i = 0; i < MAX_VPA_ALLOCS; i++) {
     if (metas[i].ptr == ptr) {
-      printf("%s raw=%p tag=%d ptr=%p active=%d\n",
-              name, metas[i].raw, metas[i].tag, metas[i].ptr, metas[i].active);
       return;
+      printf("%s raw=%p tag=%d ptr=%p nbytes=%d npages=%d active=%d\n",
+       name,
+       metas[i].raw,
+       metas[i].tag,
+       metas[i].ptr,
+       metas[i].nbytes,
+       metas[i].npages,
+       metas[i].active);
     }
   }
 
@@ -71,37 +112,47 @@ vpa_malloc(uint nbytes)
 {
   int idx;
   void *raw;
+  uint64 npages;
 
-  // 1 allocation = 1 page
-  if (nbytes == 0 || nbytes > PGSIZE)
+  if (nbytes == 0)
     return 0;
 
-  if (free_head >= 0) {
-    idx = free_head;
-    free_head = metas[idx].next_free;
-    
+  npages = roundup_pages(nbytes);
+
+  idx = pop_free_meta(npages);
+  if (idx >= 0) {
     raw = metas[idx].raw;
   } else {
     idx = find_unused_meta();
     if (idx < 0)
       return 0;
-    
-    raw = sbrk(PGSIZE);
+    raw = sbrk(npages * PGSIZE);
     if (raw == (void *)-1)
       return 0;
-   
+
     metas[idx].raw = raw;
   }
 
   // allocationごとに新しいページタグを割り当てる
-  // 同じraw pagwを再利用しても古いポインタとは別のVPAになる
+  // 同じraw pageを再利用しても古いポインタとは別のVPAになる
   metas[idx].tag = alloc_tag();
   
-  uint64 vpa = vpamap(raw, metas[idx].tag);
-  if (vpa == (uint64)-1)
-    return 0;
-  
-  metas[idx].ptr = (void *)vpa;
+  // 各raw page に対してVPA mappingを割り当てる
+  // raw が複数ページでも，タグが同じならVPA側でも連続した領域になる
+  uint64 first_vpa = 0;
+  for (uint64 i = 0; i < npages; i++) {
+    void *page = (void *)((uint64)raw + i * PGSIZE);
+    uint64 vpa = vpamap(page, metas[idx].tag);
+
+    if (vpa == (uint64)-1)
+      return 0;
+    if (i == 0)
+      first_vpa = vpa;
+  }
+
+  metas[idx].ptr = (void *)first_vpa;
+  metas[idx].nbytes = nbytes;
+  metas[idx].npages = npages;
   metas[idx].active = 1;
   metas[idx].next_free = -1;
 
@@ -117,21 +168,25 @@ vpa_free(void *ptr)
   if(idx < 0)
     return -1;
 
-  if (pgclearpresent(ptr) < 0)
-    return -1;
+  // allocationが使っているVPAの領域の全ページをinvalidにする
+  for (uint64 i = 0; i < metas[idx].npages; i++) {
+    void *page = (void *)((uint64)metas[idx].ptr + i * PGSIZE);
+    if (pgclearpresent(page) < 0)
+      return -1;
+  }
+
   metas[idx].active = 0;
-  // この枠をfreelistの先頭に追加する
   metas[idx].next_free = free_head;
   free_head = idx;
 
   return 0;
 }
-
+  
 int
 main(void)
 {
   void *a = vpa_malloc(32);
-  void *b = vpa_malloc(64);
+  void *b = vpa_malloc(PGSIZE + 16);
 
   if(a == 0 || b == 0){
     printf("initial alloc failed\n");
@@ -157,8 +212,8 @@ main(void)
 
   printf("a/b freed\n");
 
-  void *c = vpa_malloc(128);
-  void *d = vpa_malloc(256);
+  void *c = vpa_malloc(PGSIZE + 16);
+  void *d = vpa_malloc(32);
 
   if(c == 0 || d == 0){
     printf("reuse alloc failed\n");
@@ -169,11 +224,13 @@ main(void)
   print_meta("d", d);
 
   *(volatile char *)c = 3;
-  *(volatile char *)d = 4;
+  *(volatile char *)((uint64)c + PGSIZE) = 4;
+  *(volatile char *)d = 5;
+
   printf("c/d writes ok\n");
 
-  printf("old b should fault now: %p\n", b);
-  *(volatile char *)b = 5;
+  printf("old b second page should fault now: %p\n", (void *)((uint64)b + PGSIZE));
+  *(volatile char *)((uint64)b + PGSIZE) = 6;
 
   printf("ERROR: old b did not fault\n");
   exit(0);
