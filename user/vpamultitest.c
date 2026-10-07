@@ -67,36 +67,40 @@ print_meta(char *name, void *ptr)
 }
 
 static void*
-vpa_alloc(void)
+vpa_malloc(uint nbytes)
 {
   int idx;
   void *raw;
-  
-  // まずfree済みのページがあるか確認し，ある場合それを再利用する
-  // なければelse文で新しくsbrk()して作成する
+
+  // 1 allocation = 1 page
+  if (nbytes == 0 || nbytes > PGSIZE)
+    return 0;
+
   if (free_head >= 0) {
     idx = free_head;
     free_head = metas[idx].next_free;
-    // 以前使用していたfree済みページを新しいタグで再利用する
+    
     raw = metas[idx].raw;
   } else {
     idx = find_unused_meta();
     if (idx < 0)
       return 0;
-
+    
     raw = sbrk(PGSIZE);
     if (raw == (void *)-1)
       return 0;
-
+   
     metas[idx].raw = raw;
   }
 
+  // allocationごとに新しいページタグを割り当てる
+  // 同じraw pagwを再利用しても古いポインタとは別のVPAになる
   metas[idx].tag = alloc_tag();
-
+  
   uint64 vpa = vpamap(raw, metas[idx].tag);
   if (vpa == (uint64)-1)
     return 0;
-
+  
   metas[idx].ptr = (void *)vpa;
   metas[idx].active = 1;
   metas[idx].next_free = -1;
@@ -105,7 +109,7 @@ vpa_alloc(void)
 }
 
 // VPA pointerをfreeする時，物理ページをOSに返すのではなく，
-// そのVPAのPTE_Vを落として，あとでシア利用できるようにする
+// そのVPAのPTE_Vを落として，あとで再利用できるようにする
 static int
 vpa_free(void *ptr)
 {
@@ -126,8 +130,8 @@ vpa_free(void *ptr)
 int
 main(void)
 {
-  void *a = vpa_alloc();
-  void *b = vpa_alloc();
+  void *a = vpa_malloc(32);
+  void *b = vpa_malloc(64);
 
   if(a == 0 || b == 0){
     printf("initial alloc failed\n");
@@ -153,8 +157,8 @@ main(void)
 
   printf("a/b freed\n");
 
-  void *c = vpa_alloc();
-  void *d = vpa_alloc();
+  void *c = vpa_malloc(128);
+  void *d = vpa_malloc(256);
 
   if(c == 0 || d == 0){
     printf("reuse alloc failed\n");
