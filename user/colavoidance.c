@@ -247,7 +247,7 @@ main(void)
 {
   void *p;
   for(int i = 0; i < 18; i++){
-  p = vpa_malloc(32);
+  p = vpa_malloc(PGSIZE + 16);
 
   if(p == 0){
     printf("vpa_malloc failed at iter=%d\n", i);
@@ -256,7 +256,8 @@ main(void)
 
   print_meta("p", p);
   *(volatile char *)p = i;
-  printf("iter=%d write ok\n", i);
+  *(volatile char *)((uint64)p + PGSIZE) = i;
+  printf("iter=%d first/second page write ok\n", i);
 
     if(vpa_free(p) < 0){
       printf("vpa_free failed at iter=%d\n", i);
@@ -266,6 +267,6 @@ main(void)
     printf("iter=%d freed\n", i);
   }
 
-  printf("reuse loop done\n");
+  printf("2-pgage reuse loop done\n");
   exit(0);
 }
