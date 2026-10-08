@@ -92,7 +92,6 @@ print_meta(char *name, void *ptr)
 {
   for (int i = 0; i < MAX_VPA_ALLOCS; i++) {
     if (metas[i].ptr == ptr) {
-      return;
       printf("%s raw=%p tag=%d ptr=%p nbytes=%d npages=%d active=%d\n",
        name,
        metas[i].raw,
@@ -101,6 +100,7 @@ print_meta(char *name, void *ptr)
        metas[i].nbytes,
        metas[i].npages,
        metas[i].active);
+      return;
     }
   }
 
@@ -228,9 +228,8 @@ main(void)
   *(volatile char *)d = 5;
 
   printf("c/d writes ok\n");
-
-  printf("old b second page should fault now: %p\n", (void *)((uint64)b + PGSIZE));
-  *(volatile char *)((uint64)b + PGSIZE) = 6;
+  printf("old b first page should fault now: %p\n", b);
+  *(volatile char *)b = 6;
 
   printf("ERROR: old b did not fault\n");
   exit(0);

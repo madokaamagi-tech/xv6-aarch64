@@ -15,12 +15,12 @@ struct vpa_meta {
   uint64 used_tags;
   int tag;        // 今回のallocationに割り当てたタグ
   int active;     // 使用中かfree済みかを占める値
+  int retired;    // 1 でretired
   int next_free;  // free list用のリンク
 };
 
 static struct vpa_meta metas[MAX_VPA_ALLOCS];
 static int free_head = -1;  // -1はfree listが空ということを表す
-static int next_tag = 1;
 
 // タグ番号に対応するビットを返す
 static uint64
@@ -39,7 +39,7 @@ static int
 all_tags_used(int idx)
 {
   for (int tag = VPA_TAG_MIN; tag <= VPA_TAG_MAX; tag++) {
-    if (!tag_used(idx, tag))
+    if (!tags_used(idx, tag))
       return 0;
   }
   return 1;
@@ -48,28 +48,26 @@ all_tags_used(int idx)
 static int
 alloc_tag_for_meta(int idx)
 {
-  // 全てのタグを使い切った場合は再利用を許す
-  // 即時再利用を避けるため，直前のタグは used として残しておく
-  if (all_tags_used(idx)) {
-    metas[idx].used_tags = 0;
-    if (metas[idx].tag >= VPA_TAG_MIN && metas[idx].tag <= VPA_TAG_MAX)
-      metas[idx].used_tags |= tag_bit(metas[idx].tag);
-  }
-  
+  // retired ずみの raw 領域には新しいタグを割り当てない
+  if (metas[idx].retired)
+    return -1;
+
   // 直近のタグの次から探す
   int start = metas[idx].tag;
-  for (int n = 0; n < VPA_TAG_MAX - VPA_TAG_MIN; n++) {
-    int tag = VPA_TAG_MIN + ((start - VPA_TAG_MIN + 1 + n) % (VPA_TAG_MAX - VPA_TAG_MIN + 1));
 
-    if (!tag_used(idx, tag)) {
+  for (int n = 0; n <= VPA_TAG_MAX - VPA_TAG_MIN; n++) {
+    int tag = VPA_TAG_MIN + ((start - VPA_TAG_MIN + 1 + n) % (VPA_TAG_MAX - VPA_TAG_MIN + 1));
+    if (!tags_used(idx, tag)) {
       metas[idx].used_tags |= tag_bit(tag);
       return tag;
     }
   }
-
+  
+  // ここまできたらタグは全て使い切っているのでretiredを立てる
+  metas[idx].retired = 1;
   return -1;
 }
-
+/*
 static int 
 alloc_tag(void)
 {
@@ -80,7 +78,7 @@ alloc_tag(void)
 
   return tag;
 }
-
+*/
 static uint64
 roundup_pages(uint64 nbytes)
 {
@@ -120,7 +118,7 @@ pop_free_meta(uint64 npages)
   int cur = free_head;
 
   while (cur >= 0) {
-    if (metas[cur].npages == npages) {
+    if (!metas[cur].retired && metas[cur].npages == npages) {
       if (prev < 0)
         free_head = metas[cur].next_free;
       else 
@@ -143,7 +141,7 @@ print_meta(char *name, void *ptr)
 {
   for (int i = 0; i < MAX_VPA_ALLOCS; i++) {
     if (metas[i].ptr == ptr) {
-      printf("%s raw=%p tag=%d ptr=%p nbytes=%d npages=%d used_tags=%p active=%d\n",
+      printf("%s raw=%p tag=%d ptr=%p nbytes=%d npages=%d used_tags=%p active=%d retired=%d\n",
        name,
        metas[i].raw,
        metas[i].tag,
@@ -151,7 +149,8 @@ print_meta(char *name, void *ptr)
        metas[i].nbytes,
        metas[i].npages,
        metas[i].used_tags,
-       metas[i].active);
+       metas[i].active,
+       metas[i].retired);
       return;
     }
   }
@@ -185,6 +184,7 @@ vpa_malloc(uint nbytes)
     metas[idx].raw = raw;
     metas[idx].used_tags = 0;
     metas[idx].tag = 0;
+    metas[idx].retired = 0;
   }
 
   metas[idx].tag = alloc_tag_for_meta(idx);
@@ -230,6 +230,12 @@ vpa_free(void *ptr)
   }
 
   metas[idx].active = 0;
+  if (all_tags_used(idx)) {
+    metas[idx].retired = 1;
+    metas[idx].next_free = -1;
+    return 0;
+  }
+
   metas[idx].next_free = free_head;
   free_head = idx;
 
@@ -239,52 +245,27 @@ vpa_free(void *ptr)
 int
 main(void)
 {
-  void *a = vpa_malloc(32);
-  void *b = vpa_malloc(PGSIZE + 16);
+  void *p;
+  for(int i = 0; i < 18; i++){
+  p = vpa_malloc(32);
 
-  if(a == 0 || b == 0){
-    printf("initial alloc failed\n");
+  if(p == 0){
+    printf("vpa_malloc failed at iter=%d\n", i);
     exit(1);
   }
 
-  print_meta("a", a);
-  print_meta("b", b);
+  print_meta("p", p);
+  *(volatile char *)p = i;
+  printf("iter=%d write ok\n", i);
 
-  *(volatile char *)a = 1;
-  *(volatile char *)b = 2;
-  printf("a/b writes ok\n");
+    if(vpa_free(p) < 0){
+      printf("vpa_free failed at iter=%d\n", i);
+      exit(1);
+    }
 
-  if(vpa_free(a) < 0){
-    printf("free a failed\n");
-    exit(1);
+    printf("iter=%d freed\n", i);
   }
 
-  if(vpa_free(b) < 0){
-    printf("free b failed\n");
-    exit(1);
-  }
-
-  printf("a/b freed\n");
-
-  void *c = vpa_malloc(PGSIZE + 16);
-  void *d = vpa_malloc(32);
-
-  if(c == 0 || d == 0){
-    printf("reuse alloc failed\n");
-    exit(1);
-  }
-
-  print_meta("c", c);
-  print_meta("d", d);
-
-  *(volatile char *)c = 3;
-  *(volatile char *)((uint64)c + PGSIZE) = 4;
-  *(volatile char *)d = 5;
-
-  printf("c/d writes ok\n");
-  printf("old b first page should fault now: %p\n", b);
-  *(volatile char *)b = 6;
-
-  printf("ERROR: old b did not fault\n");
+  printf("reuse loop done\n");
   exit(0);
 }

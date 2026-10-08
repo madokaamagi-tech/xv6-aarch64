@@ -132,6 +132,7 @@ UPROGS=\
 	$U/_vpalloctest\
 	$U/_vpafreelisttest\
 	$U/_vpamultitest\
+	$U/_colavoidance\
 	$U/_mallocspilltest\
 	$U/_grind\
 	$U/_wc\
