@@ -14,22 +14,20 @@ void psci_call(uint64 fn, int cpuid, uint64 entry, uint64 ctxid);
 void delay(uint32 c);
 
 // kernel EL1でMTE tag checkとallocation tag accessを有効にする
-/*
 static void
 mte_enable_el1(void)
 {
   // 現在のSCTLR_EL1の値を読み出す
   uint64 sctlr = r_sctlr_el1();
-  // 次に新しいモードを入れるため，一度 tag check fault mode のビットをクリアする
-  sctlr &= ~SCTLR_TCF_MASK;
-  // tag mismatchが起きたらその命令でストップしてfaultを起こす
-  sctlr |= SCTLR_TCF_SYNC;
+  // 次に新しいモードを入れるため，一度 tag fault mode のビットをクリアする
+  sctlr &= ~(SCTLR_TCF_MASK | SCTLR_TCF0_MASK);
+  // tag mismatch が起きたらその命令でストップしてfaultを起こす
+  sctlr |= (SCTLR_TCF_SYNC | SCTLR_TCF0_SYNC);
   // EL1からallocation tagにアクセスできるようにしておく
-  sctlr |= SCTLR_ATA;
+  sctlr |= (SCTLR_ATA | SCTLR_ATA0);
   // 更新した値をSCTLR_EL1に書き込む
   w_sctlr_el1(sctlr);
 }
-*/
 /*
 static void
 mte_smoke_test(void)
@@ -92,6 +90,7 @@ main()
     kinit1(end, (void*)(KERNLINK+2*1024*1024));  // physical page allocator
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
+    mte_enable_el1();
 //    kinit2((void*)(KERNLINK+2*1024*1024), P2V(PHYSTOP));
     kinit2((void*)(KERNLINK+2*1024*1024), P2V(PHYSTOP - PGSIZE));
     consoleinit();
@@ -126,6 +125,7 @@ main()
       ;
     __sync_synchronize();
     kvminithart();    // turn on paging
+    mte_enable_el1();
     printf("hart %d starting\n", cpuid());
     trapinithart();   // install trap vector
     gicv3inithart();

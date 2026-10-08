@@ -538,7 +538,7 @@ vpa_map_tag(pagetable_t pagetable, uint64 srcva, uint64 tag)
     return -1;
 
   pa = PTE2PA(*pte);
-  flags = PTE_FLAGS(*pte);
+  flags = (PTE_FLAGS(*pte) & ~PTE_INDX(7)) | PTE_TAGGED;
 
   return mappages(pagetable, vpa, PGSIZE, pa, flags);
 }

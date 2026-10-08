@@ -1,0 +1,339 @@
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+#define PGSIZE 4096
+#define MAX_VPA_ALLOCS 16
+#define VPA_TAG_MIN 1
+#define VPA_TAG_MAX 15
+#define MTE_GRANULE_SIZE 16
+#define MTE_TAG_SHIFT 56
+#define MTE_TAG_MASK (0xfULL << MTE_TAG_SHIFT)
+
+struct vpa_meta {
+  void *raw;      // sbrk()で確保した元の仮想アドレス
+  void *ptr;      // tag + VPN(raw) で作成したVPA
+  uint64 nbytes;  // ユーザがvpa_malloc() に要求したサイズ
+  uint64 npages;  // 確保したページ数
+  uint64 used_tags;
+  int page_tag;        // 今回のallocationに割り当てたタグ
+  int active;     // 使用中かfree済みかを占める値
+  int retired;    // 1 でretired
+  int next_free;  // free list用のリンク
+
+  int object_tag;
+};
+
+static struct vpa_meta metas[MAX_VPA_ALLOCS];
+static int free_head = -1;  // -1はfree listが空ということを表す
+
+// VPA / page tag は残し，MTE logical tag だけ取り除く
+static uint64
+mte_untagged_addr(uint64 ptr)
+{
+  return ptr & ~MTE_TAG_MASK;
+}
+
+// object_tagを付与する
+static void *
+mte_tagged_ptr(void *ptr, int object_tag)
+{
+  uint64 tag_bits = ((uint64)object_tag & 0xf) << MTE_TAG_SHIFT;
+  return (void *)(mte_untagged_addr((uint64)ptr) | tag_bits);
+}
+
+// STGはtagged_ptrのlogical tagをその16byte granule のallocation tagとして書く
+static void
+mte_store_tag(void *tagged_ptr)
+{
+  asm volatile(
+      ".arch_extension memtag\n"
+      "stg %0, [%0]\n"
+      :
+      : "r"(tagged_ptr)
+      : "memory");
+}
+
+static void 
+mte_store_tag_range(void *tagged_ptr, uint64 nbytes)
+{
+  uint64 size = (nbytes + MTE_GRANULE_SIZE - 1) & ~(MTE_GRANULE_SIZE - 1);
+  for (uint64 off = 0; off < size; off += MTE_GRANULE_SIZE)
+    mte_store_tag((void *)((uint64)tagged_ptr + off));
+}
+
+// タグ番号に対応するビットを返す
+static uint64
+tag_bit(int page_tag)
+{
+  return 1ULL << page_tag;
+}
+
+static int
+tags_used(int idx, int page_tag)
+{
+  return (metas[idx].used_tags & tag_bit(page_tag)) != 0;
+}
+
+static int
+all_tags_used(int idx)
+{
+  for (int page_tag = VPA_TAG_MIN; page_tag <= VPA_TAG_MAX; page_tag++) {
+    if (!tags_used(idx, page_tag))
+      return 0;
+  }
+  return 1;
+}
+
+static int
+alloc_tag_for_meta(int idx)
+{
+  // retired ずみの raw 領域には新しいタグを割り当てない
+  if (metas[idx].retired)
+    return -1;
+
+  // 直近のタグの次から探す
+  int start = metas[idx].page_tag;
+
+  for (int n = 0; n <= VPA_TAG_MAX - VPA_TAG_MIN; n++) {
+    int page_tag = VPA_TAG_MIN + ((start - VPA_TAG_MIN + 1 + n) % (VPA_TAG_MAX - VPA_TAG_MIN + 1));
+    if (!tags_used(idx, page_tag)) {
+      metas[idx].used_tags |= tag_bit(page_tag);
+      return page_tag;
+    }
+  }
+  
+  // ここまできたらタグは全て使い切っているのでretiredを立てる
+  metas[idx].retired = 1;
+  return -1;
+}
+/*
+static int 
+alloc_tag(void)
+{
+  int tag = next_tag++;
+
+  if (next_tag >= 16)
+    next_tag = 1;
+
+  return tag;
+}
+*/
+static uint64
+roundup_pages(uint64 nbytes)
+{
+  return (nbytes + PGSIZE - 1) / PGSIZE;
+}
+
+//  まだsbrk()でページを割り当てていないエントリを探す
+//  （free list がからの時に使用する）
+static int
+find_unused_meta(void)
+{
+  for (int i = 0; i < MAX_VPA_ALLOCS; i++) {
+    if (metas[i].raw == 0)
+      return i;
+  }
+  return -1;
+}
+
+// 引数ptrと一致するmetadataを探す
+// vpa_free(ptr)でどのポインタをfreeするか調べるために使用する
+static int
+find_active_by_ptr(void *ptr)
+{
+  for (int i = 0; i < MAX_VPA_ALLOCS; i++) {
+    if (metas[i].active && metas[i].ptr == ptr)
+      return i;
+  }
+  return -1;
+}
+
+// free list の中から要求されるページ数と同じallocationを探す
+// (まずは分割や結合はせず．同じnpagesのものだけ再利用する)
+static int
+pop_free_meta(uint64 npages)
+{
+  int prev = -1;
+  int cur = free_head;
+
+  while (cur >= 0) {
+    if (!metas[cur].retired && metas[cur].npages == npages) {
+      if (prev < 0)
+        free_head = metas[cur].next_free;
+      else 
+        metas[prev].next_free = metas[cur].next_free;
+
+      metas[cur].next_free = -1;
+      return cur;
+    }
+
+    prev = cur;
+    cur = metas[cur].next_free;
+  }
+
+  return -1;
+}
+
+
+static void
+print_meta(char *name, void *ptr)
+{
+  for (int i = 0; i < MAX_VPA_ALLOCS; i++) {
+    if (metas[i].ptr == ptr) {
+      printf("%s raw=%p page_tag=%d ptr=%p nbytes=%d npages=%d used_tags=%p active=%d retired=%d\n",
+       name,
+       metas[i].raw,
+       metas[i].page_tag,
+       metas[i].ptr,
+       metas[i].nbytes,
+       metas[i].npages,
+       metas[i].used_tags,
+       metas[i].active,
+       metas[i].retired);
+      return;
+    }
+  }
+
+  printf("%s ptr=%p metadata not found\n", name, ptr);
+}
+
+static void*
+vpa_malloc(uint nbytes)
+{
+  int idx;
+  void *raw;
+  uint64 npages;
+
+  if (nbytes == 0)
+    return 0;
+
+  npages = roundup_pages(nbytes);
+
+  idx = pop_free_meta(npages);
+  if (idx >= 0) {
+    raw = metas[idx].raw;
+  } else {
+    idx = find_unused_meta();
+    if (idx < 0)
+      return 0;
+    raw = sbrk(npages * PGSIZE);
+    if (raw == (void *)-1)
+      return 0;
+
+    metas[idx].raw = raw;
+    metas[idx].used_tags = 0;
+    metas[idx].page_tag = 0;
+    metas[idx].retired = 0;
+  }
+
+  metas[idx].page_tag = alloc_tag_for_meta(idx);
+  if (metas[idx].page_tag < 0)
+    return 0;
+
+  // 各raw page に対してVPA mappingを割り当てる
+  // raw が複数ページでも，タグが同じならVPA側でも連続した領域になる
+  uint64 first_vpa = 0;
+  for (uint64 i = 0; i < npages; i++) {
+    void *page = (void *)((uint64)raw + i * PGSIZE);
+    uint64 vpa = vpamap(page, metas[idx].page_tag);
+
+    if (vpa == (uint64)-1)
+      return 0;
+    if (i == 0)
+      first_vpa = vpa;
+  }
+
+  // ひとまず固定タグをオブジェクトに付与
+  metas[idx].object_tag = 5;
+  metas[idx].ptr = mte_tagged_ptr((void *)first_vpa, metas[idx].object_tag);
+  // 対応するallocation tag を実メモリ側におく
+  mte_store_tag_range(metas[idx].ptr, nbytes);
+  metas[idx].nbytes = nbytes;
+  metas[idx].npages = npages;
+  metas[idx].active = 1;
+  metas[idx].next_free = -1;
+
+  return metas[idx].ptr;
+}
+
+// VPA pointerをfreeする時，物理ページをOSに返すのではなく，
+// そのVPAのPTE_Vを落として，あとで再利用できるようにする
+static int
+vpa_free(void *ptr)
+{
+  int idx = find_active_by_ptr(ptr);
+  if(idx < 0)
+    return -1;
+
+  uint64 base = mte_untagged_addr((uint64)metas[idx].ptr);
+
+  // allocationが使っているVPAの領域の全ページをinvalidにする
+  for (uint64 i = 0; i < metas[idx].npages; i++) {
+    void *page = (void *)(base + i * PGSIZE);
+    if (pgclearpresent(page) < 0)
+      return -1;
+  }
+
+  metas[idx].active = 0;
+  if (all_tags_used(idx)) {
+    metas[idx].retired = 1;
+    metas[idx].next_free = -1;
+    return 0;
+  }
+
+  metas[idx].next_free = free_head;
+  free_head = idx;
+
+  return 0;
+}
+
+int
+main(void)
+{
+  void *p;
+  for(int i = 0; i < 18; i++){
+    p = vpa_malloc(PGSIZE + 16);
+
+    if(p == 0){
+      printf("vpa_malloc failed at iter=%d\n", i);
+      exit(1);
+    }
+
+    print_meta("p", p);
+
+    *(volatile char *)p = i;
+    *(volatile char *)((uint64)p + PGSIZE) = i;
+
+    printf("iter=%d correct-tag writes ok\n", i);
+
+    if(vpa_free(p) < 0){
+      printf("vpa_free failed at iter=%d\n", i);
+      exit(1);
+    }
+
+    printf("iter=%d freed\n", i);
+  }
+
+  printf("reuse loop done\n");
+
+  p = vpa_malloc(32);
+  if(p == 0){
+    printf("mte test vpa_malloc failed\n");
+    exit(1);
+  }
+
+  print_meta("mte-good", p);
+
+  *(volatile char *)p = 42;
+  printf("mte good-tag write ok\n");
+
+  void *bad = mte_tagged_ptr((void *)mte_untagged_addr((uint64)p), 6);
+
+  printf("mte bad=%p, next write should MTE fault\n", bad);
+
+  *(volatile char *)bad = 99;
+
+  printf("ERROR: bad object-tag write did not fault\n");
+  exit(1);
+} 

@@ -111,8 +111,8 @@ entryothers:  // secondary CPU starts here
 
         // setup tcr
         //ldr x0, =(TCR_T0SZ(25)|TCR_T1SZ(25)|TCR_TG0(0)|TCR_TG1(2)|TCR_IPS(0))
-        // kernel address側でTBIを有効化する
-        ldr x0, =(TCR_T0SZ(25)|TCR_T1SZ(25)|TCR_TG0(0)|TCR_TG1(2)|TCR_IPS(0)|TCR_TBI1)
+        // kernel address & user address でTBIを有効化する
+        ldr x0, =(TCR_T0SZ(25)|TCR_T1SZ(25)|TCR_TG0(0)|TCR_TG1(2)|TCR_IPS(0)|TCR_TBI0|TCR_TBI1)
         msr tcr_el1, x0
 
         // setup mair

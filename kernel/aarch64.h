@@ -355,3 +355,22 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define SCTLR_TCF_SYNC  (1UL << 40)
 // EL1からallocation tagへアクセスできるように設定するビット
 #define SCTLR_ATA       (1UL << 43)
+
+// ユーザ側で同様の設定
+#define TCR_TBI0        (1UL << 37)
+#define SCTLR_TCF0_MASK (3UL << 38)
+#define SCTLR_TCF0_SYNC (1UL << 38)
+#define SCTLR_ATA0      (1UL << 42)
+
+// MTEの論理タグを取り除くためのヘルパ
+#define MTE_TAG_SHIFT 56
+#define MTE_TAG_MASK  (0xfUL << MTE_TAG_SHIFT)
+
+
+#ifndef __ASSEMBLER__
+static inline uint64
+mte_untagged_addr(uint64 va)
+{
+  return va & ~MTE_TAG_MASK;
+}
+#endif

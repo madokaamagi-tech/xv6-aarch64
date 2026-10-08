@@ -101,8 +101,10 @@ sys_pgclearpresent(void)
 {
   uint64 va;
 
-  if (argaddr(0, &va) , 0)
+  if (argaddr(0, &va) < 0)
     return -1;
+
+  va = mte_untagged_addr(va);
 
   return uvmclearpresent(myproc()->pagetable, va);
 }
@@ -116,6 +118,8 @@ sys_vpamap(void)
 
   argaddr(0, &srcva);
   argint(1, &tag);
+  
+  srcva = mte_untagged_addr(srcva);
 
   if(tag < 0 || tag > 15)
     return -1;
