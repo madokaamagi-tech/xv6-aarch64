@@ -136,6 +136,7 @@ UPROGS=\
 	$U/_mallocspilltest\
 	$U/_vpobjecttest\
 	$U/_vpobjectfree\
+	$U/_vppteclear\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
