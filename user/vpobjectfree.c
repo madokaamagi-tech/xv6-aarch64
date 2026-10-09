@@ -1,7 +1,16 @@
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+#define PGSIZE 4096
 #define MAX_VPA_PAGES 4
 #define MAX_OBJECTS 32
 #define OBJECT_SIZE 32
 #define FREE_OBJECT_TAG 0
+
+#define MTE_GRANULE_SIZE 16
+#define MTE_TAG_SHIFT 56
+#define MTE_TAG_MASK (0xfULL << MTE_TAG_SHIFT)
 
 struct vpa_page_meta {
   void *raw;         
@@ -25,6 +34,39 @@ static struct vpa_page_meta pages[MAX_VPA_PAGES];
 static struct object_meta objects[MAX_OBJECTS];
 static int next_page_tag = 1;
 static int next_object_tag = 1;
+static uint64
+
+mte_untagged_addr(uint64 ptr)
+{
+  return ptr & ~MTE_TAG_MASK;
+}
+
+static void *
+mte_tagged_ptr(void *ptr, int object_tag)
+{
+  uint64 tag_bits = ((uint64)object_tag & 0xf) << MTE_TAG_SHIFT;
+  return (void *)(mte_untagged_addr((uint64)ptr) | tag_bits);
+}
+
+static void
+mte_store_tag(void *tagged_ptr)
+{
+  asm volatile(
+    ".arch_extension memtag\n"
+    "stg %0, [%0]\n"
+    :
+    : "r"(tagged_ptr)
+    : "memory");
+}
+
+static void
+mte_store_tag_range(void *tagged_ptr, uint64 nbytes)
+{
+  uint64 size = (nbytes + MTE_GRANULE_SIZE - 1) & ~(MTE_GRANULE_SIZE - 1);
+
+  for(uint64 off = 0; off < size; off += MTE_GRANULE_SIZE)
+    mte_store_tag((void *)((uint64)tagged_ptr + off));
+}
 
 static int
 alloc_object_tag(void)
