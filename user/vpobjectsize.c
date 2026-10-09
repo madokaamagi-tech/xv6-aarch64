@@ -90,7 +90,7 @@ static void
 mark_range_free(int page_idx, int start, int ngrans)
 {
   for (int i = 0; i < ngrans; i++)
-    clear_granule_used(page_idx, start = i);
+    clear_granule_used(page_idx, start + i);
 }
 
 static int
@@ -261,6 +261,7 @@ vpa_object_free(void *ptr)
           return -1;
         pages[page_idx].active = 0;
       }
+
       return 0;
     }
   }
