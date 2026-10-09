@@ -133,6 +133,7 @@ UPROGS=\
 	$U/_vpafreelisttest\
 	$U/_vpamultitest\
 	$U/_colavoidance\
+	$U/_objcolavoidance\
 	$U/_mallocspilltest\
 	$U/_vpobjecttest\
 	$U/_vpobjectfree\
