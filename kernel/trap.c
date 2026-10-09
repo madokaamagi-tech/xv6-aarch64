@@ -6,6 +6,34 @@
 #include "proc.h"
 #include "defs.h"
 
+#define ESR_EC(esr)        (((esr) >> 26) & 0x3f)
+#define ESR_ISS(esr)       ((esr) & 0x1ffffff)
+#define ESR_DFSC(iss)      ((iss) & 0x3f)
+
+#define EC_SVC64           0x15
+#define EC_DATA_ABORT_EL0  0x24
+#define DFSC_MTE_TAG_CHECK 0x11
+
+static char *
+data_abort_kind(uint64 iss)
+{
+  uint64 dfsc = ESR_DFSC(iss);
+
+  if(dfsc == DFSC_MTE_TAG_CHECK)
+    return "MTE tag check fault";
+
+  if(dfsc == 0x04 || dfsc == 0x05 || dfsc == 0x06 || dfsc == 0x07)
+    return "translation fault / non-present VPA page";
+
+  if(dfsc == 0x09 || dfsc == 0x0a || dfsc == 0x0b)
+    return "access flag fault";
+
+  if(dfsc == 0x0d || dfsc == 0x0e || dfsc == 0x0f)
+    return "permission fault";
+
+  return "unknown data abort";
+}
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -58,10 +86,12 @@ usertrap(void)
   uint64 elr = r_elr_el1();
   uint64 far = r_far_el1();
   
-  uint64 ec = (r_esr_el1() >> 26) & 0x3f;
-  uint64 iss = esr & 0x1ffffff;
+  uint64 ec = ESR_EC(esr);
+  uint64 iss = ESR_ISS(esr);
+  uint64 dfsc = ESR_DFSC(iss);
+
   w_esr_el1(0);
-  if(ec == 21){
+  if(ec == EC_SVC64){
     // system call
 
     if(p->killed)
@@ -71,10 +101,16 @@ usertrap(void)
 
     syscall();
   } else {
-//    printf("usertrap(): unexpected ec %p pid=%d\n", r_esr_el1(), p->pid);
+    if(ec == EC_DATA_ABORT_EL0){
+      printf("usertrap(): data abort from user pid=%d\n", p->pid);
+      printf("             kind=%s dfsc=%p\n", data_abort_kind(iss), dfsc);
+      printf("             esr=%p iss=%p elr=%p far=%p\n", esr, iss, elr, far);
+    } else {
       printf("usertrap(): unexpected ec %p pid=%d\n", ec, p->pid);
-//    printf("            elr=%p far=%p\n", r_elr_el1(), r_far_el1());
-    printf("             esr=%p iss=%p elr=%p far=%p\n", esr, iss, elr, far);
+      printf("             esr=%p iss=%p elr=%p far=%p\n", esr, iss, elr, far);
+  }
+
+  p->killed = 1;
     p->killed = 1;
   }
 
