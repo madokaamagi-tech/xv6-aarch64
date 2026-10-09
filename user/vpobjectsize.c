@@ -274,22 +274,43 @@ main(void)
   void *b = vpa_object_malloc(48);
   void *c = vpa_object_malloc(80);
 
+  if(a == 0 || b == 0 || c == 0){
+    printf("initial allocation failed\n");
+    exit(1);
+  }
+
   printf("a=%p b=%p c=%p\n", a, b, c);
 
   *(volatile char *)a = 1;
   *(volatile char *)((uint64)b + 47) = 2;
   *(volatile char *)((uint64)c + 79) = 3;
-  printf("var-size writes ok\n");
+  printf("initial writes ok\n");
 
-  vpa_object_free(b);
+  if(vpa_object_free(b) < 0){
+    printf("free b failed\n");
+    exit(1);
+  }
+
   printf("freed b\n");
 
-  *(volatile char *)a = 4;
-  *(volatile char *)((uint64)c + 79) = 5;
-  printf("a/c still work after freeing b\n");
+  void *d = vpa_object_malloc(32);
+  if(d == 0){
+    printf("allocation d failed\n");
+    exit(1);
+  }
+
+  printf("d=%p\n", d);
+
+  *(volatile char *)d = 4;
+  *(volatile char *)((uint64)d + 31) = 5;
+  printf("d write ok\n");
+
+  *(volatile char *)a = 6;
+  *(volatile char *)((uint64)c + 79) = 7;
+  printf("a/c still work after hole reuse\n");
 
   printf("old b should MTE fault now: %p\n", b);
-  *(volatile char *)b = 6;
+  *(volatile char *)b = 8;
 
   printf("ERROR: old b did not fault\n");
   exit(1);
