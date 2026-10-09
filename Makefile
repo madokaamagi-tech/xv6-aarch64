@@ -137,6 +137,7 @@ UPROGS=\
 	$U/_vpobjecttest\
 	$U/_vpobjectfree\
 	$U/_vppteclear\
+	$U/_freereusetest\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
