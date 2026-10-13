@@ -284,6 +284,9 @@ alloc_vpa_page(void)
       for (int w = 0; w < GRANULE_BITMAP_WORDS; w++)
         pages[i].used_granules[w] = 0;
 
+      for (int g = 0; g < MAX_GRANULES; g++) 
+        pages[i].used_object_tags[g] = 0;
+
       return i;
     }
   }
@@ -400,6 +403,7 @@ vpa_object_free(void *ptr)
 
       int page_idx = objects[i].page_idx;
 
+      // create a new pointer to the new address with MTE tag=0
       void *free_ptr = 
         mte_tagged_ptr((void *)mte_untagged_addr((uint64)ptr),
                        FREE_OBJECT_TAG);
@@ -426,29 +430,69 @@ vpa_object_free(void *ptr)
 int
 main(void)
 {
-  void *p = vpa_object_malloc(PGSIZE + 64);
-  if(p == 0){
-    printf("large allocation failed\n");
+  void *keeper = vpa_object_malloc(16);
+  if(keeper == 0){
+    printf("keeper allocation failed\n");
     exit(1);
   }
 
-  printf("large p=%p\n", p);
+  printf("keeper=%p\n", keeper);
+  *(volatile char *)keeper = 1;
+  printf("keeper write ok\n");
 
-  *(volatile char *)p = 1;
-  *(volatile char *)((uint64)p + PGSIZE) = 2;
-  *(volatile char *)((uint64)p + PGSIZE + 63) = 3;
-  printf("large object writes ok\n");
+  void *first = 0;
 
-  if(vpa_object_free(p) < 0){
-    printf("large free failed\n");
+  for(int i = 0; i < 16; i++){
+    void *p = vpa_object_malloc(32);
+    if(p == 0){
+      printf("p allocation failed at iter=%d\n", i);
+      exit(1);
+    }
+
+    if(i == 0)
+      first = p;
+
+    printf("iter=%d p=%p\n", i, p);
+
+    *(volatile char *)p = i;
+    printf("iter=%d write ok\n", i);
+
+    if(vpa_object_free(p) < 0){
+      printf("free p failed at iter=%d\n", i);
+      exit(1);
+    }
+
+    printf("iter=%d freed\n", i);
+
+    *(volatile char *)keeper = 2;
+    printf("iter=%d keeper still ok\n", i);
+  }
+
+  printf("first reused-hole pointer=%p\n", first);
+
+  if(vpa_object_free(keeper) < 0){
+    printf("free keeper failed\n");
     exit(1);
   }
 
-  printf("large object freed; VPA pages should be invalid\n");
+  printf("freed keeper; old page should now be invalid\n");
 
-  printf("old large pointer should page fault now: %p\n", p);
-  *(volatile char *)p = 4;
+  void *q = vpa_object_malloc(32);
+  if(q == 0){
+    printf("q allocation failed\n");
+    exit(1);
+  }
 
-  printf("ERROR: old large pointer did not fault\n");
+  printf("q=%p\n", q);
+
+  *(volatile char *)q = 3;
+  printf("q write ok\n");
+
+  printf("check: first=%p q=%p\n", first, q);
+
+  printf("old first should fault by page-level invalidation now: %p\n", first);
+  *(volatile char *)first = 4;
+
+  printf("ERROR: old first did not fault\n");
   exit(1);
 }
