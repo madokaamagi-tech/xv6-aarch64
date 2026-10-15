@@ -391,7 +391,9 @@ vpa_object_free(void *ptr)
         void *free_ptr = mte_tagged_ptr((void *)base, FREE_OBJECT_TAG);
         mte_store_tag_range(free_ptr, objects[i].nbytes);
 
-        for(uint64 p = 0; p < objects[i].npages; p++){
+        // Keep a partially used final page mapped; its freed granules have tag 0.
+        uint64 full_pages = objects[i].nbytes / PGSIZE;
+        for(uint64 p = 0; p < full_pages; p++){
           void *vpa_page = (void *)(base + p * PGSIZE);
           if(pgclearpresent(vpa_page) < 0)
             return -1;
