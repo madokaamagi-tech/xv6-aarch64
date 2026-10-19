@@ -225,6 +225,34 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   }
 }
 
+// Remove VPA aliases without freeing their physical backing pages.
+int 
+vpa_unmap_range(pagetable_t pagetable, uint64 va, uint64 npages)
+{
+  if (npages == 0 || va % PGSIZE != 0 || va < VPA_BASE || va >= VPA_BASE + 16 * VPA_TAG_STRIDE)
+    return -1;
+
+  uint64 offset = (va - VPA_BASE) % VPA_TAG_STRIDE;
+
+  if (npages > (VPA_TAG_STRIDE - offset) / PGSIZE)
+    return -1;
+
+  // Validate the page before changing any mapping
+  uint64 required = PTE_V | PTE_AF | PTE_U;
+
+  for (uint64 i = 0; i < npages; i++){
+    pte_t *pte = walk(pagetable, va + i * PGSIZE, 0);
+
+    if(pte == 0 || (*pte & required) != required)
+      return -1;
+  }
+
+  uvmunmap(pagetable, va, npages, 0);
+  flush_tlb();
+
+  return 0;
+}
+
 // create an empty user page table.
 // returns 0 if out of memory.
 pagetable_t
@@ -512,6 +540,9 @@ uvmclearpresent(pagetable_t pagetable, uint64 va)
 uint64
 vpa_alias_addr(uint64 srcva, uint64 tag)
 {
+  if (tag > 15 || srcva >= VPA_TAG_STRIDE)
+    return (uint64)-1;
+
   uint64 page = PGROUNDDOWN(srcva);
   uint64 off = srcva - page;
 
@@ -522,23 +553,27 @@ vpa_alias_addr(uint64 srcva, uint64 tag)
 int
 vpa_map_tag(pagetable_t pagetable, uint64 srcva, uint64 tag)
 {
-  pte_t *pte;
-  uint64 srcpage;
-  uint64 vpa;
-  uint64 pa;
-  uint64 flags;
-
-  srcpage = PGROUNDDOWN(srcva);
-  vpa = PGROUNDDOWN(vpa_alias_addr(srcva, tag));
-
-  pte = walk(pagetable, srcpage, 0);
-  if(pte == 0)
-    return -1;
-  if((*pte & PTE_V) != PTE_V)
+  uint64 vpa = vpa_alias_addr(srcva, tag);
+  if (vpa == (uint64)-1)
     return -1;
 
-  pa = PTE2PA(*pte);
-  flags = (PTE_FLAGS(*pte) & ~PTE_INDX(7)) | PTE_TAGGED;
+  uint64 srcpage = PGROUNDDOWN(srcva);
+  vpa = PGROUNDDOWN(vpa);
+
+  pte_t *src_pte = walk(pagetable, srcpage, 0);
+  uint64 required = PTE_V | PTE_AF | PTE_U;
+
+  if (src_pte == 0 || (*src_pte & required) != required)
+    return -1;
+
+  pte_t *dst_pte = walk(pagetable, vpa, 0);
+
+  if (dst_pte != 0 && *dst_pte != 0)
+    return -1;
+
+  uint64 pa = PTE2PA(*src_pte);
+  uint64 flags = (PTE_FLAGS(*src_pte) & ~PTE_INDX(7)) | PTE_TAGGED;
 
   return mappages(pagetable, vpa, PGSIZE, pa, flags);
 }
+

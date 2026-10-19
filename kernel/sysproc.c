@@ -129,3 +129,16 @@ sys_vpamap(void)
 
   return vpa_alias_addr(srcva, tag);
 }
+
+uint64
+sys_vpaunmap(void)
+{
+  uint64 va;
+  int npages;
+
+  if (argaddr(0, &va) < 0 || argint(1, &npages) < 0 || npages <= 0)
+    return -1;
+
+  va = mte_untagged_addr(va);
+  return vpa_unmap_range(myproc()->pagetable, va, (uint64)npages);
+}

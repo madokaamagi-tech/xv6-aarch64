@@ -38,3 +38,5 @@ entry("sleep");
 entry("uptime");
 entry("pgclearpresent");
 entry("vpamap");
+entry("vpaunmap");
+

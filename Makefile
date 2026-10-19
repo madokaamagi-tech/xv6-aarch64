@@ -141,6 +141,7 @@ UPROGS=\
 	$U/_freereusetest\
 	$U/_vpobjectsize\
 	$U/_largeobject\
+	$U/_tagtest\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\

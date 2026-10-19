@@ -24,17 +24,19 @@
 #define GRANULE_BITMAP_WORDS (MAX_GRANULES / 64)
 #define FREE_OBJECT_TAG 0
 
+#define VPA_RAW_LIMIT (1ULL << 26)                // specifies the raw address limit (=VPA_TAG_STRIDE)
 #define LARGE_OBJECT_THRESHOLD PGSIZE
 #define USED_PAGE_TAGS_MASK 0xfffeU               // setting this mask prevents further reuse of a backing range
 
 
 // 2. Metadata
 struct vpa_page_meta {
-  void *raw;          // original address returned by sbrk()
+  void *raw;          // page-aligned backing address within the sbrk() allocation
   void *vpa;          // alias mapping to the same physical page
   int page_tag;       // page-granular tag, selects the VPA region
-  int active;         
+  int active;
   int live_objects;
+  int pending_map;    // backing memory without VPA mapping
   uint64 used_granules[GRANULE_BITMAP_WORDS];  // current occupancy
   uint64 used_object_tags[MAX_GRANULES];       // tag history, preserved when objects are freed
 };
@@ -54,6 +56,8 @@ struct object_meta {
   void *large_vpa;
   int large_page_tag;
   int large_range_idx;
+  int large_free_retagged;
+  uint64 large_free_next_page;
 };
 // remembers backing memory and its page-tag history across successive allocations
 struct large_range_meta {
@@ -70,7 +74,7 @@ static struct large_range_meta large_ranges[MAX_LARGE_RANGES];
 
 // small-object pages use this cyclic page-tag counter
 // large backing ranges select unused page tags from their own history
-static int next_page_tag = 1;   
+static int next_page_tag = 1;
 
 
 // 3. Forward declarations
@@ -78,6 +82,7 @@ static uint64 mte_untagged_addr(uint64 ptr);
 static void *mte_tagged_ptr(void *ptr, int object_tag);
 static void mte_store_tag_range(void *tagged_ptr, uint64 nbytes);
 static int find_free_object_meta(void);
+static int object_tag_used_for_range(int page_idx, int start, int ngrans, int tag);
 
 
 // 4. MTE pointer and allocation-tag operations
@@ -93,7 +98,7 @@ mte_untagged_addr(uint64 ptr)
 static void *
 mte_tagged_ptr(void *ptr, int object_tag)
 {
-  uint64 tag_bits = 
+  uint64 tag_bits =
     ((uint64)object_tag & 0xf) << MTE_TAG_SHIFT;
 
   return (void *)(mte_untagged_addr((uint64)ptr) | tag_bits);
@@ -182,7 +187,113 @@ roundup_granules(uint64 nbytes)
 
 // 6. Object-tag allocation and history
 
-// Convert a tag value into its history-bit position to create a mask 
+static uint32 tag_rng_state = 0x6d2b79f5U;
+
+static void
+tag_rng_seed(uint32 seed)
+{
+  tag_rng_state = seed ? seed : 0x6d2b79f5U;
+}
+
+static uint32
+tag_random_u32(void)
+{
+  uint32 x = tag_rng_state;
+
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+
+  tag_rng_state = x;
+  return x;
+}
+
+static uint32
+tag_random_below(uint32 bound)
+{
+  uint32 maximum = (uint32)~0U;
+  uint32 limit = maximum - maximum % bound;
+  uint32 value;
+
+  do {
+    value = tag_random_u32();
+  } while (value > limit);
+  return (value - 1U) % bound;
+}
+
+// Check adjacent allocation boundaries in the VPA address space.
+static int
+adjacent_object_uses_tag(uint64 start, uint64 nbytes, int tag)
+{
+  uint64 size = (nbytes + MTE_GRANULE_SIZE - 1) & ~((uint64)MTE_GRANULE_SIZE - 1);
+  uint64 end = start + size;
+
+  for (int i = 0; i < MAX_OBJECTS; i++) {
+    struct object_meta *object = &objects[i];
+
+    if (!object->active || object->object_tag != tag)
+      continue;
+
+    uint64 other_start = mte_untagged_addr((uint64)object->ptr);
+    uint64 other_size = (object->nbytes + MTE_GRANULE_SIZE - 1) & ~((uint64)MTE_GRANULE_SIZE - 1);
+
+    if (other_start + other_size == start || end == other_start)
+      return 1;
+  }
+
+  return 0;
+}
+
+// Convert a small-page granule range into its VPA byte range.
+static int
+neighbor_uses_tag(int page_idx, int start, int ngrans, int tag)
+{
+  uint64 vpa = (uint64)pages[page_idx].vpa + (uint64)start * MTE_GRANULE_SIZE;
+
+  return adjacent_object_uses_tag(vpa, (uint64)ngrans * MTE_GRANULE_SIZE, tag);
+}
+
+
+// Choose pseudorandomly among tags allowed by history and neighbors.
+static int
+alloc_object_tag_for_range(int page_idx, int start, int ngrans)
+{
+  int candidates[15];
+  int count = 0;
+
+  for (int tag = 1; tag <= 15; tag++) {
+    if (object_tag_used_for_range(page_idx, start, ngrans, tag))
+      continue;
+
+    if (neighbor_uses_tag(page_idx, start, ngrans, tag))
+      continue;
+
+    candidates[count++] = tag;
+  }
+
+  if (count == 0)
+    return -1;
+
+  return candidates[tag_random_below((uint32)count)];
+}
+
+// Choose pseudorandomly among tags different from live neighbors.
+static int
+alloc_large_object_tag(uint64 vpa, uint64 nbytes)
+{
+  int candidates[15];
+  int count = 0;
+
+  for (int tag = 1; tag <= 15; tag++) {
+    if (!adjacent_object_uses_tag(vpa, nbytes, tag))
+      candidates[count++] = tag;
+  }
+
+  return candidates[tag_random_below((uint32)count)];
+}
+
+
+// Convert a tag value into its history-bit position to create a mask
 static int
 object_tag_bit(int tag)
 {
@@ -213,46 +324,13 @@ mark_object_tag_used_for_range(int page_idx, int start, int ngrans, int tag)
     pages[page_idx].used_object_tags[start + i] |= bit;
 }
 
-// Choose and record a tag unused across the entire range.
-// Return -1 when no tag is available
-static int
-alloc_object_tag_for_range(int page_idx, int start, int ngrans)
-{
-  for(int tag = 1; tag <= 15; tag++){
-    if(!object_tag_used_for_range(page_idx, start, ngrans, tag)){
-      mark_object_tag_used_for_range(page_idx, start, ngrans, tag);
-      return tag;
-    }
-  }
-
-  return -1;
-}
-
-// Large-object MTE tags cycle independently of VPA page tags
-//
-// When a backing range is reused, it receives an unused page tag.
-// Before retagging the memory, any old partial-tail alias is invalidated
-// This prevents an old VPA pointer from becoming valid merely because
-// its MTE object tag matches again.
-static int
-alloc_large_object_tag(void)
-{
-  static int next_large_object_tag = 1;
-  int tag = next_large_object_tag++;
-
-  if (next_large_object_tag > 15)
-    next_large_object_tag = 1;
-
-  return tag;
-}
-
-
 // 7. Find a free range with an available object tag.
-// ※ A usable range needs both : 
+// ※ A usable range needs both :
 //  - enough currently free granules;
 //  - an object tag unused on every granule in that range;
 
-// Records the selected tag in the range's history and returns the starting granule index.
+// Find a free range and an available object tag.
+// Return the starting granule and write the selected tag to tag_out.
 static int
 find_free_range_with_tag(int page_idx, int ngrans, int  *tag_out)
 {
@@ -267,12 +345,43 @@ find_free_range_with_tag(int page_idx, int ngrans, int  *tag_out)
       return start;
     }
   }
-  
+
   return -1;
 }
 
 
 // 8. Page and object metadata allocation
+
+// Obtain page-aligned backing memory that fits inside the raw window.
+// Return zero without growing the heap if the request cannot fit.
+static void *
+vpa_sbrk_pages(uint64 npages)
+{
+  void *current = sbrk(0);
+
+  if (current == (void *)-1)
+    return 0;
+
+  uint64 base = (uint64)current;
+
+  if (npages == 0 || base >= VPA_RAW_LIMIT)
+    return 0;
+
+  // make sure that sbrk() is aligned to PGSIZE
+  uint64 padding = (PGSIZE - base % PGSIZE) % PGSIZE;
+  uint64 available = VPA_RAW_LIMIT - base;
+
+  if (padding > available || npages > (available - padding) / PGSIZE)
+    return 0;
+
+  uint64 total = padding + npages * PGSIZE;
+  void *raw = sbrk((int)total);
+
+  if (raw == (void *)-1)
+    return 0;
+
+  return (void *)((uint64)raw + padding);
+}
 
 static int
 find_free_object_meta(void)
@@ -285,39 +394,67 @@ find_free_object_meta(void)
   return -1;
 }
 
+// Undo a fresh, unpublished allocation at the current heap end.
+static void
+vpa_rollback_pages(uint64 old_break, void *raw, uint64 npages)
+{
+  uint64 end = (uint64)raw + npages * PGSIZE;
+  void *current = sbrk(0);
+
+  if (current == (void *)-1 || (uint64)current != end || old_break >= end || end - old_break > 0x7fffffffULL) {
+    printf("rollback: backing is not the latest heap growth\n");
+    exit(1);
+  }
+
+  if (sbrk(-(int)(end - old_break)) == (void *)-1) {
+    printf("rollback: sbrk shrink failed\n");
+    exit(1);
+  }
+}
+
 // Reuse an inactive metadata slot, but obtain new memory with sbrk()
 static int
 alloc_vpa_page(void)
 {
   for (int i = 0; i < MAX_VPA_PAGES; i++) {
-    if (pages[i].active)
+    struct vpa_page_meta *page = &pages[i];
+
+    if (page->active)
       continue;
 
-    void *raw = sbrk(PGSIZE);
-    if (raw == (void *)-1)
+    void *before = sbrk(0);
+    if (before == (void *)-1)
+      return -1;
+
+    void *raw = vpa_sbrk_pages(1);
+    if (raw == 0)
       return -1;
 
     int page_tag = next_page_tag++;
-
     if (next_page_tag > 15)
       next_page_tag = 1;
 
     uint64 vpa = vpamap(raw, page_tag);
-
-    if (vpa == (uint64)-1)
+    if (vpa == (uint64)-1) {
+      vpa_rollback_pages((uint64)before, raw, 1);
       return -1;
+    }
+    // clear allocation tags left by a previous physical-page owner
+    void *free_ptr = mte_tagged_ptr((void *)vpa, FREE_OBJECT_TAG);
+    mte_store_tag_range(free_ptr, PGSIZE);
 
-    pages[i].raw = raw;
-    pages[i].vpa = (void *)vpa;
-    pages[i].page_tag = page_tag;
-    pages[i].active = 1;
-    pages[i].live_objects = 0;
+    page->raw = raw;
+    page->vpa = (void *)vpa;
+    page->page_tag = page_tag;
+    page->live_objects = 0;
 
-    for (int w = 0; w < GRANULE_BITMAP_WORDS; w++) 
+    for (int w = 0; w < GRANULE_BITMAP_WORDS; w++)
       pages[i].used_granules[w] = 0;
 
     for (int g = 0; g < MAX_GRANULES; g++)
       pages[i].used_object_tags[g] = 0;
+
+    page->active = 1;
 
     return i;
   }
@@ -340,9 +477,10 @@ static int unused_large_page_tag(uint16 used_tags)
 }
 
 // Find reusable backing memory with the same rounded page count
-static int 
-find_large_range(uint64 npages)
+static int
+find_large_range(uint64 npages, uint64 *rollback_break)
 {
+  *rollback_break = (uint64)-1;
   int spare = -1;
 
   for (int i = 0; i < MAX_LARGE_RANGES; i++) {
@@ -356,20 +494,26 @@ find_large_range(uint64 npages)
 
     if (spare < 0 || range->raw == 0)
       spare = i;
-  }  
+  }
 
-  if(spare < 0 || npages > 0x7fffffffUL / PGSIZE)
+  if (spare < 0)
     return -1;
 
-  void *raw = sbrk(npages * PGSIZE);
+  void *before = sbrk(0);
+  if (before == (void *)-1)
+    return -1;
 
-  if(raw == (void *)-1)
-    return -1;  
+  void *raw = vpa_sbrk_pages(npages);
+
+  if (raw == 0)
+    return -1;
 
   large_ranges[spare] = (struct large_range_meta){
     .raw = raw,
     .npages = npages,
   };
+
+  *rollback_break = (uint64)before;
 
   return spare;
 }
@@ -384,8 +528,9 @@ vpa_large_object_malloc(uint nbytes)
     return 0;
 
   uint64 npages = ((uint64)nbytes + PGSIZE - 1) / PGSIZE;
-  
-  int range_idx = find_large_range(npages);
+
+  uint64 rollback_break;
+  int range_idx = find_large_range(npages, &rollback_break);
   if (range_idx < 0)
     return 0;
 
@@ -403,7 +548,7 @@ vpa_large_object_malloc(uint nbytes)
     range->tail_vpa = 0;
   }
   int page_tag = unused_large_page_tag(range->used_page_tags);
-  
+
   // Consume the tag before mapping
   range->used_page_tags |= object_tag_bit(page_tag);
 
@@ -413,13 +558,30 @@ vpa_large_object_malloc(uint nbytes)
     void *raw_page = (void *)((uint64)raw + i * PGSIZE);
     uint64 vpa = vpamap(raw_page, page_tag);
 
-    if (vpa == (uint64)-1)
+    if (vpa == (uint64)-1) {
+      if (i > 0 && vpaunmap((void *)first_vpa, (int)i) < 0) {
+        printf("rollback: VPA unmap failed\n");
+        exit(1);
+      }
+
+      if (rollback_break != (uint64)-1) {
+        vpa_rollback_pages(rollback_break, raw, npages);
+        *range = (struct large_range_meta) {0};
+      }
       return 0;
+    }
 
     if (i == 0)
       first_vpa = vpa;
   }
-  int object_tag = alloc_large_object_tag();
+
+  // fresh backing needs known tags across all pages
+  if (rollback_break != (uint64)-1) {
+    void *free_ptr = mte_tagged_ptr((void *)first_vpa, FREE_OBJECT_TAG);
+    mte_store_tag_range(free_ptr, npages * PGSIZE);
+  }
+
+  int object_tag = alloc_large_object_tag(first_vpa, nbytes);
 
   void *ptr = mte_tagged_ptr((void *)first_vpa, object_tag);
 
@@ -437,6 +599,8 @@ vpa_large_object_malloc(uint nbytes)
   objects[obj_idx].large_page_tag = page_tag;
   objects[obj_idx].large_range_idx = range_idx;
   range->active = 1;
+  objects[obj_idx].large_free_retagged = 0;
+  objects[obj_idx].large_free_next_page = 0;
 
   objects[obj_idx].page_idx = -1;
   objects[obj_idx].start_granule = -1;
@@ -485,16 +649,18 @@ vpa_object_malloc(uint nbytes)
   if (page_idx < 0) {
     page_idx = alloc_vpa_page();
 
-    if (page_idx < 0) 
+    if (page_idx < 0)
       return 0;
 
     start_granule = 0;
 
     object_tag = alloc_object_tag_for_range(page_idx, start_granule, ngrans);
 
-    if (object_tag < 0) 
+    if (object_tag < 0)
       return 0;
   }
+
+  mark_object_tag_used_for_range(page_idx, start_granule, ngrans, object_tag);
 
   mark_range_used(page_idx, start_granule, ngrans);
   pages[page_idx].live_objects++;
@@ -520,6 +686,8 @@ vpa_object_malloc(uint nbytes)
   objects[obj_idx].large_vpa = 0;
   objects[obj_idx].large_page_tag = 0;
   objects[obj_idx].large_range_idx = -1;
+  objects[obj_idx].large_free_retagged = 0;
+  objects[obj_idx].large_free_next_page = 0;
 
   return ptr;
 }
@@ -535,52 +703,57 @@ vpa_object_free(void *ptr)
 
     // 11.1 Large object : invalidate all of the dedicated pages
     if (objects[i].is_large) {
-      uint64 base = mte_untagged_addr((uint64)objects[i].large_vpa);
+      struct object_meta *object = &objects[i];
+      struct large_range_meta *range = &large_ranges[object->large_range_idx];
 
-      void *free_ptr = mte_tagged_ptr((void *)base, FREE_OBJECT_TAG);
+      uint64 base = mte_untagged_addr((uint64)object->large_vpa);
 
-      mte_store_tag_range(free_ptr, objects[i].nbytes);
-      
-      uint64 full_pages = objects[i].nbytes / PGSIZE;
-      
-      for (uint64 p = 0; p < full_pages; p++) {
-        void *vpa_page = (void *)(base + p * PGSIZE);
+      uint64 full_pages = object->nbytes / PGSIZE;
 
-        if (pgclearpresent(vpa_page) < 0)
-          return -1;
+      if (!object->large_free_retagged) {
+        void *free_ptr = mte_tagged_ptr((void *)base, FREE_OBJECT_TAG);
+
+        mte_store_tag_range(free_ptr, object->nbytes);
+        object->large_free_retagged = 1;
       }
 
-      struct large_range_meta *range = &large_ranges[objects[i].large_range_idx];
+      while (object->large_free_next_page < full_pages) {
+        uint64 p = object->large_free_next_page;
+        void *vpa_page = (void *)(base + p * PGSIZE);
 
-      range->tail_vpa = objects[i].nbytes % PGSIZE
-                        ? (void *)(base + full_pages * PGSIZE)
-                        : 0;
+        if (pgclearpresent(vpa_page) < 0) {
+          return -1;
+        }
+
+        object->large_free_next_page++;
+      }
+
+      range->tail_vpa = object->nbytes % PGSIZE ? (void *)(base + full_pages * PGSIZE) : 0;
 
       range->active = 0;
-      objects[i].active = 0;
+      object->active = 0;
 
       return 0;
     }
 
-    // 11.2 Small object : invalidate only its granules first
+    // 11.2 Small object : retag while the page remains mapped
     int page_idx = objects[i].page_idx;
 
-    void *free_ptr = mte_tagged_ptr((void *)mte_untagged_addr((uint64)ptr),
-                                        FREE_OBJECT_TAG);
+    void *free_ptr = mte_tagged_ptr(ptr, FREE_OBJECT_TAG);
 
     mte_store_tag_range(free_ptr, objects[i].ngrans * MTE_GRANULE_SIZE);
+
+    int last_object = pages[page_idx].live_objects == 1;
+    if (last_object && pgclearpresent(pages[page_idx].vpa) < 0)
+      return -1;
+
     mark_range_free(page_idx, objects[i].start_granule, objects[i].ngrans);
 
     objects[i].active = 0;
     pages[page_idx].live_objects--;
 
-    // 11.3 End the page generation only after its last object dies
-    if (pages[page_idx].live_objects == 0) {
-      if (pgclearpresent(pages[page_idx].vpa) < 0)
-        return -1;
-
+    if (last_object)
       pages[page_idx].active = 0;
-    }
 
     return 0;
   }
@@ -588,11 +761,15 @@ vpa_object_free(void *ptr)
   return -1;
 }
 
-// 12. Test object-tag exhaustion and a fresh page generation
 // 12. Test large-range reuse and page-tag exhaustion
 int
 main(void)
 {
+  // Record the seed so this trial can be reproduced.
+  uint32 seed = 12345U;
+  tag_rng_seed(seed);
+  printf("seed=%x\n", seed);
+
   // Two backing pages: one full page and a partial final page.
   uint nbytes = PGSIZE + 904;
 

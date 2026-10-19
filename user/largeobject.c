@@ -9,6 +9,8 @@
 
 #define MAX_VPA_PAGES 4
 #define MAX_OBJECTS 32
+#define MAX_LARGE_RANGES MAX_OBJECTS
+#define USED_PAGE_TAGS_MASK 0xfffeU
 #define MAX_GRANULES (PGSIZE / MTE_GRANULE_SIZE)
 #define GRANULE_BITMAP_WORDS (MAX_GRANULES / 64)
 #define FREE_OBJECT_TAG 0
@@ -25,6 +27,14 @@ struct vpa_page_meta {
   uint64 used_object_tags[MAX_GRANULES];
 };
 
+struct large_range_meta {
+  void *raw;
+  uint64 npages;
+  uint16 used_page_tags;
+  int active;
+  void *tail_vpa;
+};
+
 struct object_meta {
   int page_idx;
   int start_granule;
@@ -38,9 +48,11 @@ struct object_meta {
   void *large_raw;
   void *large_vpa;
   int large_page_tag;
+  int large_range_idx;
 };
 
 static struct vpa_page_meta pages[MAX_VPA_PAGES];
+static struct large_range_meta large_ranges[MAX_LARGE_RANGES];
 static struct object_meta objects[MAX_OBJECTS];
 
 static int next_page_tag = 1;
@@ -162,6 +174,47 @@ alloc_object_tag_for_range(int page_idx, int start, int ngrans)
 }
 
 static int
+unused_large_page_tag(uint16 used_tags)
+{
+  for(int tag = 1; tag <= 15; tag++){
+    if((used_tags & object_tag_bit(tag)) == 0)
+      return tag;
+  }
+  return -1;
+}
+
+static int
+find_large_range(uint64 npages)
+{
+  int spare = -1;
+
+  for(int i = 0; i < MAX_LARGE_RANGES; i++){
+    struct large_range_meta *range = &large_ranges[i];
+    if(range->active)
+      continue;
+    if(range->raw && range->npages == npages &&
+       unused_large_page_tag(range->used_page_tags) > 0)
+      return i;
+    if(spare < 0 || range->raw == 0)
+      spare = i;
+  }
+
+  if(spare < 0 || npages > 0x7fffffffUL / PGSIZE)
+    return -1;
+
+  void *raw = sbrk(npages * PGSIZE);
+  if(raw == (void *)-1)
+    return -1;
+
+  // Discarded backing ranges are never reused after their cache entry is replaced.
+  large_ranges[spare] = (struct large_range_meta){
+    .raw = raw,
+    .npages = npages,
+  };
+  return spare;
+}
+
+static int
 alloc_large_object_tag(void)
 {
   static int next_large_object_tag = 1;
@@ -180,15 +233,26 @@ vpa_large_object_malloc(uint nbytes)
   if(obj_idx < 0)
     return 0;
 
-  uint64 npages = (nbytes + PGSIZE - 1) / PGSIZE;
+  uint64 npages = ((uint64)nbytes + PGSIZE - 1) / PGSIZE;
 
-  void *raw = sbrk(npages * PGSIZE);
-  if(raw == (void *)-1)
+  int range_idx = find_large_range(npages);
+  if(range_idx < 0)
     return 0;
+  struct large_range_meta *range = &large_ranges[range_idx];
+  void *raw = range->raw;
 
-  int page_tag = next_page_tag++;
-  if(next_page_tag > 15)
-    next_page_tag = 1;
+  // The previous object's partial tail stays mapped only until range reuse.
+  if(range->tail_vpa){
+    if(pgclearpresent(range->tail_vpa) < 0){
+      range->used_page_tags = USED_PAGE_TAGS_MASK;
+      return 0;
+    }
+    range->tail_vpa = 0;
+  }
+
+  int page_tag = unused_large_page_tag(range->used_page_tags);
+  // Consume the tag even if mapping fails: partial aliases must never be reused.
+  range->used_page_tags |= object_tag_bit(page_tag);
 
   uint64 first_vpa = 0;
 
@@ -196,8 +260,13 @@ vpa_large_object_malloc(uint nbytes)
     void *raw_page = (void *)((uint64)raw + i * PGSIZE);
     uint64 vpa = vpamap(raw_page, page_tag);
 
-    if(vpa == (uint64)-1)
+    if(vpa == (uint64)-1){
+      for(uint64 p = 0; p < i; p++){
+        if(pgclearpresent((void *)(first_vpa + p * PGSIZE)) < 0)
+          range->used_page_tags = USED_PAGE_TAGS_MASK;
+      }
       return 0;
+    }
 
     if(i == 0)
       first_vpa = vpa;
@@ -218,6 +287,8 @@ vpa_large_object_malloc(uint nbytes)
   objects[obj_idx].large_raw = raw;
   objects[obj_idx].large_vpa = (void *)first_vpa;
   objects[obj_idx].large_page_tag = page_tag;
+  objects[obj_idx].large_range_idx = range_idx;
+  range->active = 1;
 
   objects[obj_idx].page_idx = -1;
   objects[obj_idx].start_granule = -1;
@@ -375,6 +446,7 @@ vpa_object_malloc(uint nbytes)
   objects[obj_idx].large_raw = 0;
   objects[obj_idx].large_vpa = 0;
   objects[obj_idx].large_page_tag = 0;
+  objects[obj_idx].large_range_idx = -1;
 
   return ptr;
 }
@@ -399,6 +471,11 @@ vpa_object_free(void *ptr)
             return -1;
         }
 
+        struct large_range_meta *range =
+          &large_ranges[objects[i].large_range_idx];
+        range->tail_vpa = objects[i].nbytes % PGSIZE ?
+          (void *)(base + full_pages * PGSIZE) : 0;
+        range->active = 0;
         objects[i].active = 0;
         return 0;
       }

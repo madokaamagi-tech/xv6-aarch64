@@ -106,6 +106,7 @@ extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
 extern uint64 sys_pgclearpresent(void);
 extern uint64 sys_vpamap(void);
+extern uint64 sys_vpaunmap(void);
 
 static uint64 (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -131,6 +132,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 [SYS_pgclearpresent] sys_pgclearpresent,
 [SYS_vpamap]  sys_vpamap,
+[SYS_vpaunmap]  sys_vpaunmap,
 };
 
 void
