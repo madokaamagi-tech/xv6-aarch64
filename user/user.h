@@ -26,6 +26,7 @@ int uptime(void);
 int pgclearpresent(void*);
 uint64 vpamap(void*, int);
 int vpaunmap(void*,  int);
+int mtequiet(int); // Quiet MTE faults; wait() returns MTE_FAULT_EXIT_STATUS.
 
 // ulib.c
 int stat(const char*, struct stat*);

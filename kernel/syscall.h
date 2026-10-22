@@ -23,3 +23,7 @@
 #define SYS_pgclearpresent 22
 #define SYS_vpamap 23
 #define SYS_vpaunmap 24
+#define SYS_mtequiet 25
+
+// wait() status for an MTE fault after mtequiet(1).
+#define MTE_FAULT_EXIT_STATUS (-2)

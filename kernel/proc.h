@@ -90,6 +90,7 @@ struct proc {
   void *chan;                  // If non-zero, sleeping on chan
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
+  int quiet_mte_faults;        // Opt in to silent MTE faults with a distinct status
   int pid;                     // Process ID
 
   // wait_lock must be held when using this:

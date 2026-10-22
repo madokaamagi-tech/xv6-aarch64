@@ -109,6 +109,7 @@ exec(char *path, char **argv)
   safestrcpy(p->name, last, sizeof(p->name));
     
   // Commit to the user image.
+  p->quiet_mte_faults = 0;
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
   p->sz = sz;

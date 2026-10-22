@@ -142,3 +142,16 @@ sys_vpaunmap(void)
   va = mte_untagged_addr(va);
   return vpa_unmap_range(myproc()->pagetable, va, (uint64)npages);
 }
+
+// Quiet only MTE diagnostics for this process. Other faults still report.
+uint64
+sys_mtequiet(void)
+{
+  int enabled;
+
+  if(argint(0, &enabled) < 0 || (enabled != 0 && enabled != 1))
+    return -1;
+
+  myproc()->quiet_mte_faults = enabled;
+  return 0;
+}

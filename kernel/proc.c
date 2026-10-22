@@ -113,6 +113,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->quiet_mte_faults = 0;
 
   sp = (char*)p->kstack + PGSIZE;
 
@@ -475,6 +476,7 @@ forkret(void)
     fsinit(ROOTDEV);
   }
 
+  intr_off();
   usertrapret(tf);
 }
 

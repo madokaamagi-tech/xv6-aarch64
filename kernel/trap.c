@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "syscall.h"
 
 #define ESR_EC(esr)        (((esr) >> 26) & 0x3f)
 #define ESR_ISS(esr)       ((esr) & 0x1ffffff)
@@ -101,6 +102,11 @@ usertrap(void)
 
     syscall();
   } else {
+    // Evaluation children report confirmed MTE faults through wait(), not logs.
+    if(ec == EC_DATA_ABORT_EL0 && dfsc == DFSC_MTE_TAG_CHECK &&
+       p->quiet_mte_faults)
+      exit(MTE_FAULT_EXIT_STATUS);
+
     if(ec == EC_DATA_ABORT_EL0){
       printf("usertrap(): data abort from user pid=%d\n", p->pid);
       printf("             kind=%s dfsc=%p\n", data_abort_kind(iss), dfsc);

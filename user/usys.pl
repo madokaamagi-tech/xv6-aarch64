@@ -39,4 +39,5 @@ entry("uptime");
 entry("pgclearpresent");
 entry("vpamap");
 entry("vpaunmap");
+entry("mtequiet");
 
