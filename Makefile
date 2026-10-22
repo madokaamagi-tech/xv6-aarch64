@@ -106,6 +106,12 @@ $U/_forktest: $U/forktest.o $(ULIB)
 $U/_baseline: $U/eval/baseline.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
 
+$U/_combined: $U/eval/combined.o $(ULIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+
+$U/_pagehist: $U/eval/pagehist.o $(ULIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -149,6 +155,8 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 	$U/_baseline\
+	$U/_combined\
+	$U/_pagehist\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

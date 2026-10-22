@@ -27,3 +27,4 @@
 
 // wait() status for an MTE fault after mtequiet(1).
 #define MTE_FAULT_EXIT_STATUS (-2)
+#define TRANSLATION_FAULT_EXIT_STATUS (-3)
