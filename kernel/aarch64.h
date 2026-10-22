@@ -300,6 +300,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_PXN (1UL << 53)   // Privileged eXecute Never
 #define PTE_UXN (1UL << 54)   // Unprivileged(user) eXecute Never
 #define PTE_XN (PTE_PXN|PTE_UXN)  // eXecute Never
+#define PTE_VPA_BACKING (1UL << 55)
 
 // attribute index
 // index is set by mair_el1
@@ -365,12 +366,33 @@ typedef uint64 *pagetable_t; // 512 PTEs
 // MTEの論理タグを取り除くためのヘルパ
 #define MTE_TAG_SHIFT 56
 #define MTE_TAG_MASK  (0xfUL << MTE_TAG_SHIFT)
-
+#define MTE_GRANULE_SIZE 16
 
 #ifndef __ASSEMBLER__
 static inline uint64
 mte_untagged_addr(uint64 va)
 {
   return va & ~MTE_TAG_MASK;
+}
+
+
+// Read a tag through a validated mapping in the active user page table.
+static inline int
+mte_load_tag(uint64 addr)
+{
+  uint64 saved_pan;
+
+  asm volatile(
+    ".arch_extension memtag\n"
+    ".arch_extension pan\n"
+    "mrs %1, pan\n"
+    "msr pan, #0\n"
+    "ldg %0, [%0]\n"
+    "msr pan, %1\n"
+    : "+r"(addr), "=&r"(saved_pan)
+    :
+    : "memory");
+
+  return (addr >> MTE_TAG_SHIFT) & 0xf;
 }
 #endif

@@ -426,97 +426,115 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
-// Copy from kernel to user.
-// Copy len bytes from src to virtual address dstva in a given page table.
-// Return 0 on success, -1 on error.
+// Check whether the user pointer has the correct mapping, permissions, and tags.
+// Reject the copy when they differ.
+static uint64
+user_copy_addr(pagetable_t pagetable, uint64 tagged_va, uint64 remaining, int writing, uint64 *count)
+{
+  uint64 va = mte_untagged_addr(tagged_va);
+  if (va >= (1ULL << 39))
+    return 0;
+
+  pte_t *pte = walk(pagetable, va, 0);
+  uint64 required = PTE_V | PTE_AF | PTE_U;
+
+  if (pte == 0 || (*pte & required) != required)
+    return 0;
+
+  if (writing && (*pte & PTE_RO))
+    return 0;
+
+  uint64 n = PGSIZE - (va & (PGSIZE - 1));
+
+  if((*pte & PTE_INDX(7)) == PTE_TAGGED){
+    n = MTE_GRANULE_SIZE - (va & (MTE_GRANULE_SIZE - 1));
+    if (PTE2PA(r_ttbr0_el1()) != V2P(pagetable))
+      return 0;
+
+    uint64 granule = va & ~((uint64)MTE_GRANULE_SIZE - 1);
+    int logical_tag = (tagged_va >> MTE_TAG_SHIFT) & 0xf;
+
+    if (mte_load_tag(granule) != logical_tag)
+      return 0;
+  }
+  if(n > remaining)
+    n = remaining;
+
+  *count = n;
+
+  return (uint64)P2V(PTE2PA(*pte)) +
+         (va & (PGSIZE - 1));
+}
+
+// Copy from kernel to user, validating each accessed granule.
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
-  uint64 n, va0, pa0;
-
   while(len > 0){
-    va0 = PGROUNDDOWN(dstva);
-    pa0 = uva2ka(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (dstva - va0);
-    if(n > len)
-      n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    uint64 n;
+    uint64 dst =
+      user_copy_addr(pagetable, dstva, len, 1, &n);
 
-    len -= n;
+    if(dst == 0)
+      return -1;
+
+    memmove((void *)dst, src, n);
+
     src += n;
-    dstva = va0 + PGSIZE;
+    dstva += n;
+    len -= n;
   }
+
   return 0;
 }
 
-// Copy from user to kernel.
-// Copy len bytes to dst from virtual address srcva in a given page table.
-// Return 0 on success, -1 on error.
+// Copy from user to kernel, validating each accessed granule.
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
   while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = uva2ka(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+    uint64 n;
+    uint64 src =
+      user_copy_addr(pagetable, srcva, len, 0, &n);
 
-    len -= n;
+    if(src == 0)
+      return -1;
+
+    memmove(dst, (void *)src, n);
+
     dst += n;
-    srcva = va0 + PGSIZE;
+    srcva += n;
+    len -= n;
   }
+
   return 0;
 }
 
-// Copy a null-terminated string from user to kernel.
-// Copy bytes to dst from virtual address srcva in a given page table,
-// until a '\0', or max.
-// Return 0 on success, -1 on error.
+// Check only the granules actually read before the terminating zero.
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+  while(max > 0){
+    uint64 n;
+    uint64 src =
+      user_copy_addr(pagetable, srcva, max, 0, &n);
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = uva2ka(pagetable, va0);
-    if(pa0 == 0)
+    if(src == 0)
       return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
+    for(uint64 i = 0; i < n; i++){
+      char c = *(char *)(src + i);
+      *dst++ = c;
+
+      if(c == '\0')
+        return 0;
     }
 
-    srcva = va0 + PGSIZE;
+    srcva += n;
+    max -= n;
   }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+
+  return -1;
 }
 
 int
@@ -561,19 +579,28 @@ vpa_map_tag(pagetable_t pagetable, uint64 srcva, uint64 tag)
   vpa = PGROUNDDOWN(vpa);
 
   pte_t *src_pte = walk(pagetable, srcpage, 0);
-  uint64 required = PTE_V | PTE_AF | PTE_U;
+  uint64 required = PTE_V | PTE_AF;
 
   if (src_pte == 0 || (*src_pte & required) != required)
     return -1;
 
-  pte_t *dst_pte = walk(pagetable, vpa, 0);
+  // Accept a user page or backing protected by an earlier mapping.
+  if ((*src_pte & (PTE_U | PTE_VPA_BACKING)) == 0)
+    return -1;
 
+  pte_t *dst_pte = walk(pagetable, vpa, 0);
   if (dst_pte != 0 && *dst_pte != 0)
     return -1;
 
   uint64 pa = PTE2PA(*src_pte);
-  uint64 flags = (PTE_FLAGS(*src_pte) & ~PTE_INDX(7)) | PTE_TAGGED;
+  uint64 flags = (PTE_FLAGS(*src_pte) & ~PTE_INDX(7)) | PTE_TAGGED | PTE_U;
 
-  return mappages(pagetable, vpa, PGSIZE, pa, flags);
+  if (mappages(pagetable, vpa, PGSIZE, pa, flags) < 0)
+    return -1;
+
+  *src_pte = (*src_pte & ~PTE_U) | PTE_VPA_BACKING;
+  flush_tlb();
+
+  return 0;
 }
 

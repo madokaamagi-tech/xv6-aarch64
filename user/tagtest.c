@@ -59,6 +59,7 @@ struct object_meta {
   int large_free_retagged;
   uint64 large_free_next_page;
 };
+
 // remembers backing memory and its page-tag history across successive allocations
 struct large_range_meta {
   void *raw;
@@ -187,38 +188,45 @@ roundup_granules(uint64 nbytes)
 
 // 6. Object-tag allocation and history
 
-static uint32 tag_rng_state = 0x6d2b79f5U;
-
-static void
-tag_rng_seed(uint32 seed)
-{
-  tag_rng_state = seed ? seed : 0x6d2b79f5U;
-}
+static uint64 tag_rng_state;
 
 static uint32
 tag_random_u32(void)
 {
-  uint32 x = tag_rng_state;
+  uint64 previous = tag_rng_state;
 
-  x ^= x << 13;
-  x ^= x >> 17;
-  x ^= x << 5;
+  tag_rng_state = previous * 6364136223846793005ULL + 109ULL;
 
-  tag_rng_state = x;
-  return x;
+  uint32 mixed = (uint32)((previous ^ (previous >> 18)) >> 27);
+  uint32 rotation = (uint32)(previous >> 59);
+
+  if (rotation == 0)
+    return mixed;
+
+  return (mixed >> rotation) | (mixed << (32U - rotation));
+}
+
+static void
+tag_rng_seed(uint32 seed)
+{
+  tag_rng_state = 0;
+  (void)tag_random_u32();
+
+  tag_rng_state += seed;
+  (void)tag_random_u32();
 }
 
 static uint32
 tag_random_below(uint32 bound)
 {
-  uint32 maximum = (uint32)~0U;
-  uint32 limit = maximum - maximum % bound;
-  uint32 value;
+  uint32 threshold = (uint32)((1ULL << 32) % bound);
 
-  do {
-    value = tag_random_u32();
-  } while (value > limit);
-  return (value - 1U) % bound;
+  for (;;) {
+    uint32 value = tag_random_u32();
+
+    if (value >= threshold)
+      return value % bound;
+  }
 }
 
 // Check adjacent allocation boundaries in the VPA address space.
