@@ -118,6 +118,9 @@ $U/_objhist: $U/eval/objhist.o $(ULIB)
 $U/_adjtest: $U/eval/adjtest.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
 
+$U/_allpol: $U/eval/allpol.o $(ULIB)
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -165,6 +168,7 @@ UPROGS=\
 	$U/_pagehist\
 	$U/_objhist\
 	$U/_adjtest\
+	$U/_allpol\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
